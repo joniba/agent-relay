@@ -11,7 +11,7 @@ A tiny core plus four pluggable seams (**Transport**, **Identity**, **Credential
 ## Requirements
 
 - **GitHub Copilot CLI** started with `--experimental` (extensions are gated behind it).
-- **Node.js 22+** (the default transport uses the built-in `node:sqlite`).
+- **Node.js 22.5+** (the default transport uses the built-in `node:sqlite`, unflagged since 22.5.0).
 
 ## Install
 

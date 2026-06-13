@@ -16,12 +16,19 @@ import { createRelay } from "./core/relay.mjs";
 let relay = null;
 let self = null;
 let transport = null;
-let stopped = false;
+let ready = false; // true only after a fully successful bootstrap (relay started)
+let bootError = null; // set if bootstrap failed (terminal, not transient)
+let cleanedUp = false;
 
-const NOT_READY = {
-  textResultForLlm: "agent-relay is still starting up — try again in a moment.",
-  resultType: "failure",
-};
+/** Result returned by tools before the relay is usable (booting OR boot-failed). */
+function notReadyResult() {
+  return bootError
+    ? { textResultForLlm: `agent-relay failed to start: ${bootError}`, resultType: "failure" }
+    : {
+        textResultForLlm: "agent-relay is still starting up — try again in a moment.",
+        resultType: "failure",
+      };
+}
 
 const tools = [
   {
@@ -42,7 +49,7 @@ const tools = [
       required: ["to", "content"],
     },
     handler: async (args) => {
-      if (!relay) return NOT_READY;
+      if (!ready) return notReadyResult();
       const res = await relay.sendMessage({
         to: args.to,
         content: args.content,
@@ -63,7 +70,7 @@ const tools = [
     description: "List the agent-relay sessions currently reachable for messaging.",
     parameters: { type: "object", properties: {} },
     handler: async () => {
-      if (!relay) return NOT_READY;
+      if (!ready) return notReadyResult();
       const agents = await relay.listAgents();
       if (agents.length === 0) {
         return {
@@ -84,7 +91,7 @@ const tools = [
 
 const hooks = {
   onSessionStart: async () => {
-    if (!self) return {};
+    if (!ready) return {}; // don't advertise connectivity until fully registered
     return {
       additionalContext:
         `You are connected to agent-relay as "${self.name}". ` +
@@ -99,8 +106,8 @@ const hooks = {
 
 /** Deregister presence then stop the transport. Idempotent. */
 async function shutdown() {
-  if (stopped) return;
-  stopped = true;
+  if (cleanedUp) return;
+  cleanedUp = true;
   try {
     if (transport && self) await transport.deregister(self);
   } catch {
@@ -125,11 +132,20 @@ try {
   await transport.register(self);
   relay = createRelay({ session, self, transport, interceptors: config.interceptors });
   relay.start();
+  ready = true;
   await session.log?.(`agent-relay: registered as "${self.name}" — ready`);
+  // If a teardown was requested while we were booting, honor it now.
+  if (cleanedUp) {
+    cleanedUp = false;
+    await shutdown();
+  }
 } catch (err) {
+  bootError = err.message;
   await session.log?.(`agent-relay failed to start: ${err.message}`, { level: "error" });
 }
 
-// Best-effort cleanup if the host tears us down without onSessionEnd.
-process.on("SIGTERM", () => { void shutdown(); });
-process.on("SIGINT", () => { void shutdown(); });
+// Best-effort cleanup if the host tears us down without onSessionEnd. Use `once`
+// (no stacked handlers) and explicitly exit — a signal listener suppresses Node's
+// default terminate, so we must drain + exit ourselves.
+process.once("SIGTERM", () => { void shutdown().finally(() => process.exit(0)); });
+process.once("SIGINT", () => { void shutdown().finally(() => process.exit(0)); });
