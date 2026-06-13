@@ -1,0 +1,14 @@
+# Specs are local-only working artifacts (requirements/design/plan + probes)
+spec/
+
+# Node
+node_modules/
+
+# Local mesh state + logs (the default sqlite-poll transport's store)
+*.db
+*.db-wal
+*.db-shm
+*.wal
+*.sqlite
+logs/
+.andromeda/

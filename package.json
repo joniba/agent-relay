@@ -1,0 +1,27 @@
+{
+  "name": "agent-relay",
+  "version": "0.1.0",
+  "description": "Minimal, unopinionated cross-session messaging for GitHub Copilot CLI — wake one session from another via session.send(). Pluggable transport / identity / credentials / interceptors.",
+  "type": "module",
+  "main": "extension/extension.mjs",
+  "license": "MIT",
+  "author": "joniba",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joniba/agent-relay.git"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "copilot-cli",
+    "extension",
+    "agent",
+    "multi-agent",
+    "cross-session",
+    "ipc"
+  ]
+}
