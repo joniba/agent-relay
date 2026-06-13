@@ -25,9 +25,12 @@
  *   Return the currently-addressable peers (realizes F3 discovery).
  *
  * @property {(message: Message) => Promise<SendResult>} send
- *   Outbound: record/transmit a message toward its recipient. Resolves once the
- *   transport considers the message accepted; returns an error SendResult for an
- *   unknown recipient.
+ *   Outbound: record/transmit a message toward its recipient. `message.to`
+ *   addresses the recipient by its {@link AgentIdentity} — resolving to an exact
+ *   `id` if one matches, else to the most-recently-active session with that
+ *   `name` (names may collide; ids are unique). Resolves once the transport
+ *   considers the message accepted; returns `{accepted:false, error}` for an
+ *   unknown recipient. The opaque `message.meta` MUST be carried through untouched.
  *
  * @property {(onMessage: (message: Message) => (void | Promise<void>)) => void} startReceiving
  *   Inbound: begin delivering messages addressed to this session by invoking
@@ -41,7 +44,11 @@
  *   poison, so a rejected handler here means a genuine transient wake failure.
  *
  * @property {() => Promise<void>} stop
- *   Stop receiving and release resources.
+ *   Terminal: stop receiving and release resources (timers, connections, DB
+ *   handles). MUST be idempotent and MUST quiesce any in-flight delivery before
+ *   releasing resources. This is distinct from {@link Transport.deregister}:
+ *   callers SHOULD `deregister` (to promptly remove presence) and THEN `stop`;
+ *   a transport MAY also let presence lapse via staleness if only `stop` is called.
  */
 
 /**

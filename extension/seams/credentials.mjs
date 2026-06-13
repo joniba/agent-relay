@@ -15,7 +15,7 @@
 /**
  * Opaque credential material. Shape is transport-defined (token, cert paths,
  * connection string, …) — the core treats it as a black box.
- * @typedef {object} Credentials
+ * @typedef {unknown} Credentials
  */
 
 export {}; // contract-only module (types via JSDoc)
