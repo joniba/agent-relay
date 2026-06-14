@@ -140,22 +140,21 @@ test("onChange returns a dispose function", async () => {
   assert.equal(typeof dispose, "function");
 });
 
-test("B3 promotion: cold B2 miss → warm + re-read → onChange fires with the alias", async () => {
+test("B3 promotion: cold B2 miss → poll until alias appears → onChange fires", async () => {
   const { session } = makeSession("sid");
   let reads = 0;
-  let warmed = false;
   const identity = createMagicAliasIdentity({
     fallback: fakeFallback,
     deps: {
       env: {},
-      // First read (during resolve) misses; subsequent reads (after warm) hit.
+      // First reads (boot + early polls) miss; magic's backfill then populates it.
       readAliases: () => {
         reads += 1;
-        return reads === 1 ? makeState([]) : makeState([{ alias: "stone", agent_task_id: "sid" }]);
+        return reads < 3 ? makeState([]) : makeState([{ alias: "stone", agent_task_id: "sid" }]);
       },
       isMagicPresent: () => true,
-      warmCache: async () => { warmed = true; },
-      retryDelayMs: 0,
+      pollIntervalMs: 5,
+      pollWindowMs: 2000,
     },
   });
   const self = await identity.resolve(session);
@@ -166,73 +165,89 @@ test("B3 promotion: cold B2 miss → warm + re-read → onChange fires with the 
   assert.ok(await waitFor(() => received !== null), "onChange never fired");
   assert.equal(received.name, "stone");
   assert.equal(received.id, "sid");
-  assert.equal(warmed, true);
 });
 
-test("dispose() aborts an in-flight promotion: onChange never fires", async () => {
+test("B3 poll window elapses without an alias → onChange never fires (stays on fallback)", async () => {
   const { session } = makeSession("sid");
-  let reads = 0;
   const identity = createMagicAliasIdentity({
     fallback: fakeFallback,
     deps: {
       env: {},
-      // miss at boot (arms B3); would hit after warm if it continued.
-      readAliases: () => {
-        reads += 1;
-        return reads === 1 ? makeState([]) : makeState([{ alias: "stone", agent_task_id: "sid" }]);
-      },
+      readAliases: () => makeState([]), // never appears
       isMagicPresent: () => true,
-      // Warm resolves ONLY when aborted — lets us dispose mid-flight.
-      warmCache: ({ signal }) => new Promise((res) => signal.addEventListener("abort", () => res(), { once: true })),
-      retryDelayMs: 0,
+      pollIntervalMs: 5,
+      pollWindowMs: 40, // elapses quickly
+    },
+  });
+  await identity.resolve(session);
+  let received = null;
+  identity.onChange((next) => { received = next; });
+  await new Promise((r) => setTimeout(r, 120)); // > pollWindowMs
+  assert.equal(received, null, "fired despite the alias never appearing");
+});
+
+test("dispose() aborts an in-flight poll: onChange never fires", async () => {
+  const { session } = makeSession("sid");
+  const identity = createMagicAliasIdentity({
+    fallback: fakeFallback,
+    deps: {
+      env: {},
+      // miss at boot AND during polling, so promote() is mid-poll when disposed.
+      readAliases: () => makeState([]),
+      isMagicPresent: () => true,
+      pollIntervalMs: 50,
+      pollWindowMs: 5000,
     },
   });
   await identity.resolve(session); // B2 miss → promotion armed
 
   let received = null;
   const dispose = identity.onChange((next) => { received = next; });
-  dispose(); // abort before warm completes
+  dispose(); // abort while the poll is awaiting its interval
   await tick();
   assert.equal(received, null, "promotion fired despite dispose");
 });
 
-test("magic absent: B3 never arms — warm not spawned, onChange never fires", async () => {
+test("magic absent: B3 never arms — never polls, onChange never fires", async () => {
   const { session } = makeSession("sid");
-  let warmCalls = 0;
+  let reads = 0;
   const identity = createMagicAliasIdentity({
     fallback: fakeFallback,
     deps: {
       env: {},
-      readAliases: () => makeState([]),
+      readAliases: () => { reads += 1; return makeState([]); },
       isMagicPresent: () => false,
-      warmCache: async () => { warmCalls += 1; },
-      retryDelayMs: 0,
+      pollIntervalMs: 5,
+      pollWindowMs: 2000,
     },
   });
   await identity.resolve(session);
+  const readsAfterResolve = reads; // the single B2 read
   let received = null;
   identity.onChange((next) => { received = next; });
   await tick();
-  assert.equal(warmCalls, 0, "warmCache must not run when magic is absent");
+  assert.equal(reads, readsAfterResolve, "must not poll when magic is absent");
   assert.equal(received, null);
 });
 
-test("warm B2 hit: already resolved → no promotion, no warm spawn", async () => {
+test("warm B2 hit: already resolved → no promotion, no polling", async () => {
   const { session } = makeSession("sid");
-  let warmCalls = 0;
+  let reads = 0;
   const identity = createMagicAliasIdentity({
     fallback: fakeFallback,
     deps: {
       env: {},
-      readAliases: () => makeState([{ alias: "stone", agent_task_id: "sid" }]),
+      readAliases: () => { reads += 1; return makeState([{ alias: "stone", agent_task_id: "sid" }]); },
       isMagicPresent: () => true,
-      warmCache: async () => { warmCalls += 1; },
+      pollIntervalMs: 5,
+      pollWindowMs: 2000,
     },
   });
   assert.equal((await identity.resolve(session)).name, "stone");
+  const readsAfterResolve = reads;
   let received = null;
   identity.onChange((next) => { received = next; });
   await tick();
-  assert.equal(warmCalls, 0, "no warm when the alias was already resolved at boot");
+  assert.equal(reads, readsAfterResolve, "no polling when the alias resolved at boot");
   assert.equal(received, null);
 });

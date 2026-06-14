@@ -1,5 +1,4 @@
 import { readFileSync, existsSync } from "node:fs";
-import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -14,19 +13,21 @@ import { join } from "node:path";
  *     `agent_task_id` is THIS session's local id. Fail-closed — any error or
  *     non-unique match yields the fallback name. Never blocks/spawns/networks.
  *   - B3 (async, off the boot path, best-effort, one-shot): TRIGGERED by
- *     `onChange()`. Warm magic's cache out-of-band (run `magic remote whoami`
- *     for its side effect), re-read the map, and if a unique alias now appears
- *     fire the callback so the entry re-registers under it.
+ *     `onChange()`. Magic warms its OWN alias cache at sessionStart (its
+ *     `backfillAliases` hook), so we simply POLL `aliases.json` for a bounded
+ *     window; once this session's unique alias appears we fire the callback so
+ *     the entry re-registers under it. No subprocess, no knowledge of magic's
+ *     install location — purely a local-file read.
  *
  * Explicit `AGENT_RELAY_NAME` hard-short-circuits ALL magic work.
  *
- * Every filesystem/process touchpoint is injectable (`deps`) for headless tests.
+ * Every filesystem touchpoint is injectable (`deps`) for headless tests.
  *
  * @param {object} opts
  * @param {import('../seams/identity.mjs').IdentityProvider} opts.fallback
  *   Resolved when no alias is available (e.g. `identity/folder-name.mjs`).
  * @param {object} [opts.deps]  Test seams: env, stateRoot, readAliases,
- *   warmCache, magicBin, isMagicPresent, timeoutMs, retryDelayMs.
+ *   isMagicPresent, pollWindowMs, pollIntervalMs.
  * @returns {import('../seams/identity.mjs').IdentityProvider}
  */
 export function createMagicAliasIdentity({ fallback, deps = {} } = {}) {
@@ -38,12 +39,11 @@ export function createMagicAliasIdentity({ fallback, deps = {} } = {}) {
   const stateRoot =
     deps.stateRoot ?? env.MAGIC_STATE_ROOT ?? join(homedir(), ".copilot", "m-state");
   const readAliases = deps.readAliases ?? defaultReadAliases;
-  const warmCache = deps.warmCache ?? defaultWarmCache;
-  const magicBin = deps.magicBin ?? resolveMagicBin(env);
-  const isMagicPresent =
-    deps.isMagicPresent ?? (() => magicPlausiblyPresent(stateRoot, magicBin));
-  const timeoutMs = deps.timeoutMs ?? 8000;
-  const retryDelayMs = deps.retryDelayMs ?? 250;
+  const isMagicPresent = deps.isMagicPresent ?? (() => magicPlausiblyPresent(stateRoot));
+  // Poll long enough to cover magic's sessionStart backfill (≤3s listSessions
+  // timeout + overhead) without lingering — best-effort, one-shot.
+  const pollWindowMs = deps.pollWindowMs ?? 12000;
+  const pollIntervalMs = deps.pollIntervalMs ?? 500;
 
   let localSessionId = null; // the key we match against magic's agent_task_id
   let resolvedId = null; // the (stable) identity id, for the onChange payload
@@ -86,7 +86,7 @@ export function createMagicAliasIdentity({ fallback, deps = {} } = {}) {
       return { id: fb.id, name: alias };
     }
 
-    // Cold miss: arm B3 only if magic looks present (else never spawn anything).
+    // Cold miss: arm B3 only if magic looks present (else never poll).
     armed = !!isMagicPresent();
     return fb;
   }
@@ -114,26 +114,26 @@ export function createMagicAliasIdentity({ fallback, deps = {} } = {}) {
     };
   }
 
-  /** Best-effort, one-shot cache-warm → re-read → fire callback on a unique alias. */
+  /**
+   * Best-effort, one-shot promotion: magic warms its own alias cache at
+   * sessionStart, so we POLL `aliases.json` for a bounded window until this
+   * session's unique alias appears, then fire the callback. No subprocess.
+   */
   async function promote() {
     promoted = true;
     controller = new AbortController();
-    try {
-      await warmCache({ sessionId: localSessionId, magicBin, signal: controller.signal, timeoutMs });
-    } catch {
-      /* best-effort — warming is allowed to fail */
-    }
-    if (disposed) return;
-
-    let alias = lookupAlias(readAliases(stateRoot), localSessionId);
-    if (!alias) {
-      // One short delayed retry — magic may write the file non-atomically.
-      await delay(retryDelayMs, controller.signal);
-      if (disposed) return;
-      alias = lookupAlias(readAliases(stateRoot), localSessionId);
-    }
-    if (!disposed && cb && alias && alias !== fallbackName) {
-      cb({ id: resolvedId, name: alias });
+    const deadline = Date.now() + pollWindowMs;
+    while (!disposed) {
+      const alias = lookupAlias(readAliases(stateRoot), localSessionId);
+      if (alias) {
+        // Found our entry — promote only if it differs from the name in use.
+        if (!disposed && cb && alias !== fallbackName) {
+          cb({ id: resolvedId, name: alias });
+        }
+        return; // resolved (whether or not it differed) — stop polling
+      }
+      if (Date.now() >= deadline) return; // window elapsed — stay on fallback
+      await delay(pollIntervalMs, controller.signal);
     }
   }
 
@@ -189,73 +189,17 @@ function lookupAlias(state, sessionId) {
   return count === 1 ? found : null;
 }
 
-/** True if magic looks present enough to be worth warming its cache. */
-function magicPlausiblyPresent(stateRoot, magicBin) {
-  try {
-    if (existsSync(join(stateRoot, "remote"))) return true;
-  } catch {
-    /* ignore */
-  }
-  try {
-    if (magicBin && existsSync(magicBin)) return true;
-  } catch {
-    /* ignore */
-  }
-  return false;
-}
-
-/** Locate magic's CLI entry: explicit env → standard install path → none. */
-function resolveMagicBin(env) {
-  if (env.AGENT_RELAY_MAGIC_BIN) return env.AGENT_RELAY_MAGIC_BIN;
-  const standard = join(
-    homedir(),
-    ".copilot",
-    "installed-plugins",
-    "_direct",
-    "magic",
-    "bin",
-    "magic.mjs",
-  );
-  try {
-    if (existsSync(standard)) return standard;
-  } catch {
-    /* ignore */
-  }
-  return null;
-}
-
 /**
- * Warm magic's alias cache by running `magic remote whoami` for its SIDE EFFECT
- * (its slow path writes this session's agent_task_id via syncFromListing). Pure
- * best-effort: resolves regardless of outcome, no-ops if the bin is unknown.
+ * True if magic looks present enough to be worth polling for an alias — i.e. the
+ * user has used magic-remote before, so `m-state/remote/` exists and magic's
+ * sessionStart backfill will populate this session's entry. If absent, never poll.
  */
-function defaultWarmCache({ sessionId, magicBin, signal, timeoutMs }) {
-  return new Promise((resolve) => {
-    if (!magicBin) return resolve();
-    let child;
-    try {
-      child = spawn(process.execPath, [magicBin, "remote", "whoami"], {
-        stdio: "ignore",
-        signal,
-        env: { ...process.env, COPILOT_AGENT_SESSION_ID: sessionId },
-      });
-    } catch {
-      return resolve();
-    }
-    const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        /* ignore */
-      }
-    }, timeoutMs);
-    const done = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    child.once("exit", done);
-    child.once("error", done);
-  });
+function magicPlausiblyPresent(stateRoot) {
+  try {
+    return existsSync(join(stateRoot, "remote"));
+  } catch {
+    return false;
+  }
 }
 
 /** Abortable delay; resolves (never rejects) on timeout OR abort. */

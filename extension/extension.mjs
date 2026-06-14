@@ -158,7 +158,9 @@ try {
       transport
         .register(self)
         .then(() =>
-          session.log?.(`agent-relay: name resolved — re-registered "${previous}" as "${self.name}"`),
+          // Re-announce prominently (globe) so the new addressable name is visible
+          // even though "registered as … — ready" was already printed at boot.
+          session.log?.(`🌐 agent-relay: now registered as "${self.name}" (was "${previous}")`),
         )
         .catch(() => {
           // Re-register failed: roll back so the core's name matches the registry.
