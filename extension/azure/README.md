@@ -57,3 +57,22 @@ import swap.
   gated by Entra.
 - The token is minted **locally on each machine** via the user's `az login` /
   environment (`DefaultAzureCredential`). Tokens are never stored or transferred.
+
+## Provisioning & lifecycle
+
+Run `scripts/provision-azure.ps1 -ServerName pg-agent-relay-<unique>` **once** per
+environment (it's idempotent). It creates the resource group, the Flexible Server
+(Entra-only auth, password auth disabled, TLS enforced), sets the signed-in user as
+the Entra admin, and the application database — printing only the **non-secret**
+`AGENT_RELAY_PG_*` settings to export. See the repo README's *Cross-machine
+messaging* section for the per-machine setup.
+
+- **Cost:** a rough compute estimate for the default Burstable **B1ms** SKU is ~$12–15/month
+  (excludes storage/backup; varies by region/currency — check Azure pricing for exact figures).
+  The server is meant to stay running as the shared substrate.
+- **Region:** defaults to `israelcentral` (`-Location` to change).
+- **Teardown** when no longer needed (replace `rg-agent-relay` if you used `-ResourceGroup`):
+
+  ```powershell
+  az group delete --name rg-agent-relay --yes
+  ```
