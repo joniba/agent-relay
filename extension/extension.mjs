@@ -7,10 +7,13 @@
 //
 // Requires `copilot --experimental` (extensions are gated behind it) and Node 22+.
 
+import { hostname } from "node:os";
+
 import { joinSession } from "@github/copilot-sdk/extension";
 import { createConfig } from "./config.mjs";
 import { createRelay } from "./core/relay.mjs";
 import { createCopilotSink } from "./sinks/copilot.mjs";
+import { formatRoster } from "./roster.mjs";
 
 // Assigned during bootstrap (after joinSession resolves). The tool/hook handlers
 // below close over these and tolerate being called before bootstrap completes.
@@ -79,9 +82,7 @@ const tools = [
           resultType: "success",
         };
       }
-      const lines = agents
-        .map((a) => `- ${a.name}${a.self ? " (you)" : ""}  [id: ${a.id}]`)
-        .join("\n");
+      const lines = formatRoster(agents);
       return {
         textResultForLlm: `Reachable agent-relay sessions:\n${lines}`,
         resultType: "success",
@@ -129,6 +130,11 @@ try {
   const config = createConfig();
   transport = config.transport;
   self = await config.identity.resolve(session);
+  // Display-only device name (the machine this session runs on). Surfaced in the
+  // cross-machine roster (e.g. "gull (my-laptop)") so a human can tell machines
+  // apart; NEVER used for addressing or collision. A transport that doesn't store
+  // it (the local SQLite default) simply ignores it.
+  self.deviceName = process.env.AGENT_RELAY_HOST || hostname();
   await transport.init({ self, credentials: config.credentials });
   await transport.register(self);
   // The Sink is the runtime-specific seam: this Copilot entry wakes via
