@@ -62,6 +62,9 @@ $dest        = Join-Path $extRoot 'agent-relay'
 New-Item -ItemType Directory -Force -Path $extRoot | Out-Null
 
 # --- Handle an existing destination (idempotent / safe) ---------------------
+# When already linked to this clone we keep the link but still fall through to
+# the statusline wiring below, so a refresh (git pull + re-run) stays idempotent.
+$skipInstall = $false
 if (Test-Path -LiteralPath $dest) {
     $item     = Get-Item -LiteralPath $dest -Force
     $linkType = $item.LinkType
@@ -72,39 +75,41 @@ if (Test-Path -LiteralPath $dest) {
     }
 
     if (-not $Copy -and $sameLink) {
-        Write-Host "Already installed: $dest -> $source ($linkType). Nothing to do." -ForegroundColor Green
-        Write-Host "`nNext: run ``copilot --experimental`` in any folder." -ForegroundColor Cyan
-        return
+        Write-Host "Already installed: $dest -> $source ($linkType)." -ForegroundColor Green
+        $mode = "$linkType".ToLower()
+        $skipInstall = $true
     }
-
-    if (-not $Force) {
+    elseif (-not $Force) {
         $kind = if ($linkType) { "a $linkType to $target" } else { "a directory" }
         Write-Error "Destination '$dest' already exists ($kind). Re-run with -Force to replace it."
         exit 1
     }
-
-    # -Force: remove the existing destination. A reparse point (junction/symlink)
-    # is deleted as a link only (never recursing into its target); a real
-    # directory is removed recursively.
-    Write-Warning "Replacing existing '$dest' (-Force)."
-    if ($linkType) { $item.Delete() }
-    else { Remove-Item -LiteralPath $dest -Recurse -Force }
+    else {
+        # -Force: remove the existing destination. A reparse point (junction/symlink)
+        # is deleted as a link only (never recursing into its target); a real
+        # directory is removed recursively.
+        Write-Warning "Replacing existing '$dest' (-Force)."
+        if ($linkType) { $item.Delete() }
+        else { Remove-Item -LiteralPath $dest -Recurse -Force }
+    }
 }
 
 # --- Install: junction (default) or copy ------------------------------------
-if ($Copy) {
-    New-Item -ItemType Directory -Force -Path $dest | Out-Null
-    Copy-Item -Recurse -Force (Join-Path $source '*') $dest
-    $mode = 'copied'
-} else {
-    try {
-        New-Item -ItemType Junction -Path $dest -Target $source | Out-Null
-        $mode = 'junction'
-    } catch {
-        Write-Warning "Junction failed ($($_.Exception.Message)). Falling back to copy."
+if (-not $skipInstall) {
+    if ($Copy) {
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
         Copy-Item -Recurse -Force (Join-Path $source '*') $dest
         $mode = 'copied'
+    } else {
+        try {
+            New-Item -ItemType Junction -Path $dest -Target $source | Out-Null
+            $mode = 'junction'
+        } catch {
+            Write-Warning "Junction failed ($($_.Exception.Message)). Falling back to copy."
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            Copy-Item -Recurse -Force (Join-Path $source '*') $dest
+            $mode = 'copied'
+        }
     }
 }
 
@@ -113,8 +118,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $dest 'extension.mjs'))) {
     throw "Install verification failed: '$dest\extension.mjs' is missing."
 }
 
-Write-Host "`n✓ Installed agent-relay -> $dest ($mode)" -ForegroundColor Green
-if ($mode -eq 'junction') { Write-Host "  Source: $source  (a later ``git pull`` updates the live extension)" }
+if (-not $skipInstall) {
+    Write-Host "`n✓ Installed agent-relay -> $dest ($mode)" -ForegroundColor Green
+    if ($mode -eq 'junction') { Write-Host "  Source: $source  (a later ``git pull`` updates the live extension)" }
+}
 
 # --- Statusline: point Copilot's single statusLine slot at agent-relay --------
 # agent-relay shows THIS session's locally-generated alias below the prompt.

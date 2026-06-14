@@ -51,37 +51,44 @@ dest="$ext_root/agent-relay"
 mkdir -p "$ext_root"
 
 # --- Handle an existing destination (idempotent / safe) ---------------------
+# When already linked to this clone we keep the link but still fall through to
+# the statusline wiring below, so a refresh (git pull + re-run) stays idempotent.
+skip_install=0
 if [ -e "$dest" ] || [ -L "$dest" ]; then
   if [ "$COPY" -eq 0 ] && [ -L "$dest" ] && [ "$(readlink "$dest")" = "$source_dir" ]; then
-    echo "Already installed: $dest -> $source_dir (symlink). Nothing to do."
-    echo; echo "Next: run \`copilot --experimental\` in any folder."
-    exit 0
-  fi
-  if [ "$FORCE" -eq 0 ]; then
+    echo "Already installed: $dest -> $source_dir (symlink)."
+    mode="symlink"
+    skip_install=1
+  elif [ "$FORCE" -eq 0 ]; then
     echo "Destination '$dest' already exists. Re-run with --force to replace it." >&2
     exit 1
+  else
+    echo "WARNING: replacing existing '$dest' (--force)." >&2
+    # A symlink is removed as a link only; a real directory is removed recursively.
+    if [ -L "$dest" ]; then rm "$dest"; else rm -rf "$dest"; fi
   fi
-  echo "WARNING: replacing existing '$dest' (--force)." >&2
-  # A symlink is removed as a link only; a real directory is removed recursively.
-  if [ -L "$dest" ]; then rm "$dest"; else rm -rf "$dest"; fi
 fi
 
 # --- Install: symlink (default) or copy -------------------------------------
-if [ "$COPY" -eq 1 ]; then
-  mkdir -p "$dest"
-  cp -R "$source_dir"/. "$dest"/
-  mode="copied"
-else
-  ln -s "$source_dir" "$dest"
-  mode="symlink"
+if [ "$skip_install" -eq 0 ]; then
+  if [ "$COPY" -eq 1 ]; then
+    mkdir -p "$dest"
+    cp -R "$source_dir"/. "$dest"/
+    mode="copied"
+  else
+    ln -s "$source_dir" "$dest"
+    mode="symlink"
+  fi
 fi
 
 # --- Verify -----------------------------------------------------------------
 [ -f "$dest/extension.mjs" ] || { echo "Install verification failed: '$dest/extension.mjs' is missing." >&2; exit 1; }
 
-echo
-echo "✓ Installed agent-relay -> $dest ($mode)"
-[ "$mode" = "symlink" ] && echo "  Source: $source_dir  (a later \`git pull\` updates the live extension)"
+if [ "$skip_install" -eq 0 ]; then
+  echo
+  echo "✓ Installed agent-relay -> $dest ($mode)"
+  [ "$mode" = "symlink" ] && echo "  Source: $source_dir  (a later \`git pull\` updates the live extension)"
+fi
 
 # --- Statusline: point Copilot's single statusLine slot at agent-relay --------
 # agent-relay shows THIS session's locally-generated alias below the prompt.
