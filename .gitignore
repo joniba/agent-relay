@@ -1,6 +1,9 @@
 # Specs are local-only working artifacts (requirements/design/plan + probes)
 spec/
 
+# Git worktrees live inside the repo root but are never tracked
+worktrees/
+
 # Node
 node_modules/
 
