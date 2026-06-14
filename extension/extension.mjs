@@ -20,6 +20,8 @@ let transport = null;
 let ready = false; // true only after a fully successful bootstrap (relay started)
 let bootError = null; // set if bootstrap failed (terminal, not transient)
 let cleanedUp = false;
+let closing = false; // set FIRST in shutdown so a late identity change can't re-register
+let disposeIdentity = null; // cancels an in-flight late-alias promotion
 
 /** Result returned by tools before the relay is usable (booting OR boot-failed). */
 function notReadyResult() {
@@ -109,13 +111,19 @@ const hooks = {
 async function shutdown() {
   if (cleanedUp) return;
   cleanedUp = true;
+  closing = true; // BEFORE anything else: a late onChange must now no-op.
   try {
-    if (transport && self) await transport.deregister(self);
+    disposeIdentity?.(); // abort any in-flight alias promotion + drop its callback
   } catch {
     /* best-effort */
   }
   try {
-    if (relay) await relay.stop();
+    if (transport && self) await transport.deregister(self); // remove presence (DB still open)
+  } catch {
+    /* best-effort */
+  }
+  try {
+    if (relay) await relay.stop(); // release timers/DB last
   } catch {
     /* best-effort */
   }
@@ -138,6 +146,27 @@ try {
   relay.start();
   ready = true;
   await session.log?.(`agent-relay: registered as "${self.name}" — ready`);
+
+  // Late identity-name promotion: if the identity resolves a name after boot
+  // (e.g. an alias warmed in the background), re-register the same-id session
+  // under it. Subscribing triggers the lookup; we subscribe only after a healthy boot.
+  if (typeof config.identity.onChange === "function") {
+    disposeIdentity = config.identity.onChange((next) => {
+      if (closing || !next || !next.name || next.name === self.name) return;
+      const previous = self.name;
+      self.name = next.name; // shared identity object — the core reads name live
+      transport
+        .register(self)
+        .then(() =>
+          session.log?.(`agent-relay: name resolved — re-registered "${previous}" as "${self.name}"`),
+        )
+        .catch(() => {
+          // Re-register failed: roll back so the core's name matches the registry.
+          self.name = previous;
+        });
+    });
+  }
+
   // If a teardown was requested while we were booting, honor it now.
   if (cleanedUp) {
     cleanedUp = false;

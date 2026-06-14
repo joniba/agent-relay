@@ -16,7 +16,11 @@
  *   One-time setup (open store, connect, etc.). Called once before any other method.
  *
  * @property {(self: AgentIdentity) => Promise<void>} register
- *   Make this session discoverable to peers under its identity.
+ *   Make this session discoverable to peers under its identity. MUST be an
+ *   idempotent upsert keyed on the stable `self.id`: calling it again with the
+ *   same `id` and a changed `self.name` MUST update the addressable name (not
+ *   create a duplicate). A late identity-name change (e.g. an alias resolved
+ *   after boot) relies on this to re-register under the new name.
  *
  * @property {(self: AgentIdentity) => Promise<void>} deregister
  *   Remove this session from discovery (called on session end).
