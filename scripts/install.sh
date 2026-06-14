@@ -13,10 +13,12 @@ set -euo pipefail
 
 COPY=0
 FORCE=0
+NO_STATUSLINE=0
 for arg in "$@"; do
   case "$arg" in
     --copy)  COPY=1 ;;
     --force) FORCE=1 ;;
+    --no-statusline) NO_STATUSLINE=1 ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' ; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
@@ -80,11 +82,37 @@ fi
 echo
 echo "✓ Installed agent-relay -> $dest ($mode)"
 [ "$mode" = "symlink" ] && echo "  Source: $source_dir  (a later \`git pull\` updates the live extension)"
+
+# --- Statusline: point Copilot's single statusLine slot at agent-relay --------
+# agent-relay shows THIS session's locally-generated alias below the prompt.
+# This replaces whatever statusLine command was previously configured.
+if [ "$NO_STATUSLINE" -eq 0 ]; then
+  status_script="$dest/bin/agent-relay-statusline.mjs"
+  if [ -f "$status_script" ]; then
+    settings="${COPILOT_HOME:-$HOME/.copilot}/settings.json"
+    node -e '
+      const fs = require("fs"), path = require("path");
+      const [p, cmd] = process.argv.slice(1);
+      let s = {};
+      try { s = JSON.parse(fs.readFileSync(p, "utf8")) || {}; } catch {}
+      const prev = s.statusLine && s.statusLine.command ? s.statusLine.command : "(none)";
+      s.statusLine = { type: "command", command: cmd };
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, JSON.stringify(s, null, 2));
+      process.stderr.write("✓ Statusline -> agent-relay (" + p + ")\n");
+      if (prev !== cmd) process.stderr.write("  (replaced: " + prev + ")\n");
+    ' "$settings" "node \"$status_script\""
+  else
+    echo "WARNING: statusline script not found at $status_script — skipped." >&2
+  fi
+fi
+
 cat <<EOF
 
 Next steps (this script does NOT launch Copilot):
   1. (optional) name this session in the mesh:  export AGENT_RELAY_NAME="tia"
   2. start with extensions enabled:             copilot --experimental
 
-On load you'll see: agent-relay: registered as "<name>" - ready
+On load you'll see: agent-relay: registered as "<alias>" - ready
+The same alias renders below the prompt as [<alias>] (statusline).
 EOF

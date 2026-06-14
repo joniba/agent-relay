@@ -1,7 +1,7 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createFolderNameIdentity } from "./identity/folder-name.mjs";
+import { createLocalAliasIdentity } from "./identity/local-alias.mjs";
 import { createNoneCredentials } from "./credentials/none.mjs";
 import { createSqlitePollTransport } from "./transports/sqlite-poll.mjs";
 
@@ -13,8 +13,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * interceptors (guardrails), edit ONLY this function.
  *
  * Defaults: SQLite-poll transport (DB co-located with the extension; override
- * with AGENT_RELAY_DB), folder-name identity (override the name with
- * AGENT_RELAY_NAME), no credentials, no interceptors.
+ * with AGENT_RELAY_DB); local wordlist identity (a stone-style alias generated
+ * locally from the session id — override the name with AGENT_RELAY_NAME); no
+ * credentials, no interceptors.
  *
  * @returns {{
  *   identity: import('./seams/identity.mjs').IdentityProvider,
@@ -26,7 +27,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export function createConfig() {
   const dbPath = process.env.AGENT_RELAY_DB || join(__dirname, "agent-relay.db");
   return {
-    identity: createFolderNameIdentity(),
+    identity: createLocalAliasIdentity(),
     credentials: createNoneCredentials(),
     transport: createSqlitePollTransport({ dbPath }),
     interceptors: [],

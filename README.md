@@ -57,12 +57,20 @@ and the `send_message` / `list_relay_agents` tools become available.
 ## Identity (who you are in the mesh)
 
 Each session registers under a **name** (how peers address it) and a stable **id**
-(its Copilot session id). By default the name is the **launch-folder leaf**. Override it:
+(its Copilot session id). By default the name is a short, friendly **alias**
+(e.g. `stone`, `gull`) derived deterministically from the session id — instant,
+offline, no network. If two live sessions would land on the same word, the registry
+resolves the collision automatically (each session walks an ordered list of candidates
+and takes the first one not held by another active session). Override it:
 
 ```powershell
 $env:AGENT_RELAY_NAME = "tia"      # this session is addressable as "tia"
 copilot --experimental
 ```
+
+The alias also renders below your prompt as `[stone]` via the Copilot **statusline**
+(wired up by `scripts/install.ps1` / `scripts/install.sh`; pass `-NoStatusline` /
+`--no-statusline` to skip).
 
 ## Usage
 
@@ -82,7 +90,7 @@ overrides for the defaults:
 
 | Variable | Effect | Default |
 |---|---|---|
-| `AGENT_RELAY_NAME` | This session's mesh name | launch-folder leaf |
+| `AGENT_RELAY_NAME` | This session's mesh name | wordlist alias from session id |
 | `AGENT_RELAY_DB`   | Path to the shared SQLite store | `agent-relay.db` beside the extension |
 
 > All sessions that share an `AGENT_RELAY_DB` (or a single global install) form one mesh.
@@ -95,7 +103,7 @@ changes (OCP):
 - **Transport** (`extension/seams/transport.mjs`) — storage + delivery. Default:
   `transports/sqlite-poll.mjs`. A cloud-store or push transport is a drop-in replacement
   (this is the path to cross-machine messaging).
-- **Identity** (`seams/identity.mjs`) — how a session is named. Default: `identity/folder-name.mjs`.
+- **Identity** (`seams/identity.mjs`) — how a session is named. Default: `identity/local-alias.mjs`.
 - **Credentials** (`seams/credentials.mjs`) — auth material a remote transport needs.
   Default: `credentials/none.mjs`.
 - **Interceptor** (`seams/interceptor.mjs`) — middleware on send/receive and the wake

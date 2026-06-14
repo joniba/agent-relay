@@ -16,7 +16,11 @@
  *   One-time setup (open store, connect, etc.). Called once before any other method.
  *
  * @property {(self: AgentIdentity) => Promise<void>} register
- *   Make this session discoverable to peers under its identity.
+ *   Make this session discoverable to peers under its identity. If
+ *   `self.candidates` is a non-empty array, the registry MAY register under the
+ *   first candidate not already held by another id (atomic collision avoidance)
+ *   and reflect the chosen name back on `self.name`; otherwise it uses
+ *   `self.name` as-is. Re-registering the same `id` updates its row in place.
  *
  * @property {(self: AgentIdentity) => Promise<void>} deregister
  *   Remove this session from discovery (called on session end).

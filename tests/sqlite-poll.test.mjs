@@ -43,6 +43,61 @@ test("none credentials returns null", async () => {
 
 // ─── sqlite-poll transport ───────────────────────────────────────
 
+test("register: collision avoidance — second session walks to its next free candidate", async () => {
+  const { dbPath, cleanup } = tempDb();
+  const t = createSqlitePollTransport({ dbPath });
+  try {
+    await t.init({ self: { id: "a", name: "stone" }, credentials });
+    // Two sessions whose first preference is the same word ("stone").
+    const a = { id: "a", name: "stone", candidates: ["stone", "stork", "sand"] };
+    const b = { id: "b", name: "stone", candidates: ["stone", "stork", "sand"] };
+    await t.register(a);
+    await t.register(b);
+    assert.equal(a.name, "stone", "first session keeps its first choice");
+    assert.equal(b.name, "stork", "second session walks past the taken 'stone'");
+    const names = (await t.listAgents()).map((x) => x.name).sort();
+    assert.deepEqual(names, ["stone", "stork"], "two distinct registered names");
+  } finally {
+    await t.stop();
+    cleanup();
+  }
+});
+
+test("register: no candidates → name used as-is (duplicates allowed for explicit names)", async () => {
+  const { dbPath, cleanup } = tempDb();
+  const t = createSqlitePollTransport({ dbPath });
+  try {
+    await t.init({ self: { id: "a", name: "frontend" }, credentials });
+    const a = { id: "a", name: "frontend" };
+    const b = { id: "b", name: "frontend" };
+    await t.register(a);
+    await t.register(b);
+    assert.equal(a.name, "frontend");
+    assert.equal(b.name, "frontend", "no candidates → no collision walking");
+  } finally {
+    await t.stop();
+    cleanup();
+  }
+});
+
+test("register: a STALE session's name does not reserve a candidate", async () => {
+  const { dbPath, cleanup } = tempDb();
+  // staleMs=1 → the first session goes stale almost immediately.
+  const t = createSqlitePollTransport({ dbPath, staleMs: 1 });
+  try {
+    await t.init({ self: { id: "old", name: "stone" }, credentials });
+    const old = { id: "old", name: "stone", candidates: ["stone", "stork"] };
+    await t.register(old);
+    await new Promise((r) => setTimeout(r, 10)); // let 'old' go stale
+    const fresh = { id: "new", name: "stone", candidates: ["stone", "stork"] };
+    await t.register(fresh);
+    assert.equal(fresh.name, "stone", "stale peer should not reserve 'stone'");
+  } finally {
+    await t.stop();
+    cleanup();
+  }
+});
+
 test("two instances over one DB: A.send → B receives the same message", async () => {
   const { dbPath, cleanup } = tempDb();
   const alice = createSqlitePollTransport({ dbPath, pollIntervalMs: 15 });

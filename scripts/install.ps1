@@ -28,7 +28,8 @@
 [CmdletBinding()]
 param(
     [switch]$Copy,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$NoStatusline
 )
 
 $ErrorActionPreference = 'Stop'
@@ -114,11 +115,37 @@ if (-not (Test-Path -LiteralPath (Join-Path $dest 'extension.mjs'))) {
 
 Write-Host "`n✓ Installed agent-relay -> $dest ($mode)" -ForegroundColor Green
 if ($mode -eq 'junction') { Write-Host "  Source: $source  (a later ``git pull`` updates the live extension)" }
+
+# --- Statusline: point Copilot's single statusLine slot at agent-relay --------
+# agent-relay shows THIS session's locally-generated alias below the prompt.
+# This replaces whatever statusLine command was previously configured.
+if (-not $NoStatusline) {
+    $statusScript = Join-Path $dest 'bin\agent-relay-statusline.mjs'
+    if (Test-Path -LiteralPath $statusScript) {
+        $settingsPath = if ($env:COPILOT_HOME) { Join-Path $env:COPILOT_HOME 'settings.json' } else { Join-Path $copilotHome 'settings.json' }
+        $settings = @{}
+        if (Test-Path -LiteralPath $settingsPath) {
+            try { $settings = Get-Content -Raw -LiteralPath $settingsPath | ConvertFrom-Json -AsHashtable } catch { $settings = @{} }
+            if ($null -eq $settings) { $settings = @{} }
+        }
+        $previous = $null
+        if ($settings.statusLine -and $settings.statusLine.command) { $previous = $settings.statusLine.command }
+        $cmd = 'node "' + $statusScript + '"'
+        $settings.statusLine = @{ type = 'command'; command = $cmd }
+        $settings | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $settingsPath -Encoding utf8
+        Write-Host "✓ Statusline -> agent-relay ($settingsPath)" -ForegroundColor Green
+        if ($previous -and $previous -ne $cmd) { Write-Host "  (replaced: $previous)" -ForegroundColor DarkGray }
+    } else {
+        Write-Warning "Statusline script not found at $statusScript — skipped."
+    }
+}
+
 Write-Host @"
 
 Next steps (this script does NOT launch Copilot):
   1. (optional) name this session in the mesh:  `$env:AGENT_RELAY_NAME = "tia"
   2. start with extensions enabled:             copilot --experimental
 
-On load you'll see: agent-relay: registered as "<name>" - ready
+On load you'll see: agent-relay: registered as "<alias>" - ready
+The same alias renders below the prompt as [<alias>] (statusline).
 "@ -ForegroundColor Cyan
