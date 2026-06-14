@@ -13,6 +13,9 @@
   "engines": {
     "node": ">=22.5.0"
   },
+  "dependencies": {
+    "@azure/identity": "^4.5.0"
+  },
   "scripts": {
     "test": "node --test"
   },
