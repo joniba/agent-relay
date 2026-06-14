@@ -4,8 +4,8 @@
 > running session can send a message to another and **wake it into a turn** — no
 > human at the keyboard — using the first-party `session.send()` SDK primitive.
 
-A tiny core plus four pluggable seams (**Transport**, **Identity**, **Credentials**,
-**Interceptor**). It ships with single-machine defaults (local SQLite + polling) and
+A tiny core plus five pluggable seams (**Transport**, **Identity**, **Credentials**,
+**Interceptor**, **Sink**). It ships with single-machine defaults (local SQLite + polling) and
 **no** built-in safety/guardrails — those are opt-in interceptors you add later.
 
 ## Requirements
@@ -15,14 +15,35 @@ A tiny core plus four pluggable seams (**Transport**, **Identity**, **Credential
 
 ## Install
 
-Copy the extension into your Copilot extensions directory so the entry lives at
-`~/.copilot/extensions/agent-relay/extension.mjs`:
+Clone the repo, then run the install script — it links (or copies) `extension/` into
+`~/.copilot/extensions/agent-relay/` and verifies the entry. It does **not** launch Copilot.
+
+```powershell
+# Windows / PowerShell
+git clone https://github.com/joniba/agent-relay.git
+pwsh agent-relay/scripts/install.ps1          # junction (a later `git pull` updates it live)
+#   ...-Copy   to copy instead of link
+#   ...-Force  to replace an existing install
+```
+
+```bash
+# macOS / Linux
+git clone https://github.com/joniba/agent-relay.git
+agent-relay/scripts/install.sh                # symlink (a later `git pull` updates it live)
+#   --copy / --force  as above
+```
+
+<details>
+<summary>Manual install (no script)</summary>
+
+Copy the extension so the entry lives at `~/.copilot/extensions/agent-relay/extension.mjs`:
 
 ```powershell
 $dest = "$env:USERPROFILE\.copilot\extensions\agent-relay"
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Copy-Item -Recurse -Force .\extension\* $dest
 ```
+</details>
 
 Then start Copilot with extensions enabled:
 

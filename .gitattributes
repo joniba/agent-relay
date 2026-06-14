@@ -1,0 +1,8 @@
+# Keep shell scripts LF so they run on macOS/Linux even when committed from Windows.
+*.sh text eol=lf
+
+# PowerShell scripts stay CRLF.
+*.ps1 text eol=crlf
+
+# Default: let git normalize text line endings.
+* text=auto
