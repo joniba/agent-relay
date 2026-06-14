@@ -35,7 +35,7 @@ const tools = [
     name: "send_message",
     description:
       "Send a text message to another agent-relay session, waking it into a new turn. " +
-      "Address the recipient by name (see list_agents) or by its session id.",
+      "Address the recipient by name (see list_relay_agents) or by its session id.",
     parameters: {
       type: "object",
       properties: {
@@ -66,7 +66,7 @@ const tools = [
     },
   },
   {
-    name: "list_agents",
+    name: "list_relay_agents",
     description: "List the agent-relay sessions currently reachable for messaging.",
     parameters: { type: "object", properties: {} },
     handler: async () => {
@@ -95,7 +95,7 @@ const hooks = {
     return {
       additionalContext:
         `You are connected to agent-relay as "${self.name}". ` +
-        `Use list_agents to see reachable peers and send_message(to, content) to message ` +
+        `Use list_relay_agents to see reachable peers and send_message(to, content) to message ` +
         `another session — their replies arrive automatically as new turns (no polling).`,
     };
   },

@@ -6,7 +6,7 @@ import { runChain, renderPrompt } from "./interceptors.mjs";
  * SESSION-AGNOSTIC so it is unit-testable without a live Copilot CLI.
  *
  * Given a session-like object and the already-resolved seams, it:
- *   - exposes the `send_message` / `list_agents` tool handlers,
+ *   - exposes the `send_message` / `list_relay_agents` tool handlers,
  *   - rejects self-send (the one micro-rule, OD1),
  *   - routes inbound messages through the interceptor chain, renders the wake
  *     prompt, and calls `session.send()` to wake the agent.
@@ -49,7 +49,7 @@ export function createRelay({ session, self, transport, interceptors = [] }) {
   }
 
   /**
-   * `list_agents` tool handler — proxies the transport's registry and flags self.
+   * `list_relay_agents` tool handler — proxies the transport's registry and flags self.
    * @returns {Promise<Array<import('../seams/identity.mjs').AgentIdentity & { self: boolean }>>}
    */
   async function listAgents() {

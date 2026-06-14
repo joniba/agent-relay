@@ -31,7 +31,7 @@ copilot --experimental
 ```
 
 On load you'll see a timeline entry like `agent-relay: registered as "<name>" — ready`,
-and the `send_message` / `list_agents` tools become available.
+and the `send_message` / `list_relay_agents` tools become available.
 
 ## Identity (who you are in the mesh)
 
@@ -47,12 +47,12 @@ copilot --experimental
 
 From inside a session:
 
-- **`list_agents`** — see who's reachable.
+- **`list_relay_agents`** — see who's reachable.
 - **`send_message(to, content)`** — message another session by name or id; it wakes and
   may reply with `send_message` back to you. Replies arrive automatically as new turns —
   no polling.
 
-Example prompt: *"Use list_agents, then send_message to bob asking for the build status."*
+Example prompt: *"Use list_relay_agents, then send_message to bob asking for the build status."*
 
 ## Configuration
 
