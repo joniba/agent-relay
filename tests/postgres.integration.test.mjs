@@ -338,6 +338,88 @@ test("a stale session that resumes re-registers (no resurrected duplicate alias)
   await b.stop();
 });
 
+// ── sweep / retention ────────────────────────────────────────────────────────
+
+test("sweep deletes old messages + long-stale agents, keeps fresh ones", { skip }, async () => {
+  // messageTtl 24h, agentRetention 7d (the defaults). We forge old timestamps
+  // directly so the test doesn't have to wait.
+  const a = makeTransport();
+  await a.init(ctx("sw-a", "alpha"));
+  await a.register(ident("sw-a", "alpha"));
+
+  const pool = new pg.Pool({ ...PG, ssl: false, max: 1 });
+  try {
+    // A fresh + an old agent (old one hasn't heartbeat in 8 days → past 7d window).
+    await pool.query(
+      `INSERT INTO agents (id, name, online, registered_at, last_heartbeat)
+       VALUES ('sw-old', 'ancient', false, now() - interval '8 days', now() - interval '8 days')`,
+    );
+    // A fresh + an old message (old one is 25h past → beyond the 24h TTL).
+    await pool.query(
+      `INSERT INTO messages (id, from_name, to_target, recipient_id, body, ts, status)
+       VALUES ('msg-old', 'x', 'alpha', 'sw-a', 'stale', now() - interval '25 hours', 'pending'),
+              ('msg-new', 'x', 'alpha', 'sw-a', 'fresh', now(), 'pending')`,
+    );
+
+    const result = await a.sweep();
+    assert.equal(result.swept, true, "the only live session wins the sweep lock");
+    assert.equal(result.messages, 1, "exactly the >24h message is removed");
+    assert.equal(result.agents, 1, "exactly the >7d agent is removed");
+
+    const msgs = (await pool.query("SELECT id FROM messages ORDER BY id")).rows.map((r) => r.id);
+    assert.deepEqual(msgs, ["msg-new"], "fresh message survives, stale one swept");
+    const agents = (await pool.query("SELECT id FROM agents ORDER BY id")).rows.map((r) => r.id);
+    assert.ok(agents.includes("sw-a"), "the live session's own row survives");
+    assert.ok(!agents.includes("sw-old"), "the long-stale agent is swept");
+
+    // Idempotent: a second sweep with nothing old removes nothing.
+    const again = await a.sweep();
+    assert.equal(again.swept, true);
+    assert.equal(again.messages, 0);
+    assert.equal(again.agents, 0);
+  } finally {
+    await pool.end();
+    await a.stop();
+  }
+});
+
+test("sweep no-ops (does not delete) when another session holds the sweep lock", { skip }, async () => {
+  const a = makeTransport();
+  await a.init(ctx("swl-a", "alpha"));
+  await a.register(ident("swl-a", "alpha"));
+
+  // Two SEPARATE single-conn pools: one holds the lock, one runs verification —
+  // so the verification query never waits on the holder's checked-out connection.
+  const verifyPool = new pg.Pool({ ...PG, ssl: false, max: 1 });
+  const holderPool = new pg.Pool({ ...PG, ssl: false, max: 1 });
+  let holder;
+  try {
+    await verifyPool.query(
+      `INSERT INTO messages (id, from_name, to_target, recipient_id, body, ts, status)
+       VALUES ('msg-stale', 'x', 'alpha', 'swl-a', 'old', now() - interval '25 hours', 'pending')`,
+    );
+    // Hold the sweep advisory lock from a separate session so a.sweep() can't get it.
+    holder = await holderPool.connect();
+    await holder.query("BEGIN");
+    const got = (await holder.query("SELECT pg_try_advisory_xact_lock(498061003) AS ok")).rows[0].ok;
+    assert.equal(got, true, "the holder grabs the sweep lock first");
+
+    const result = await a.sweep();
+    assert.equal(result.swept, false, "the contending sweep no-ops");
+    assert.equal(result.skipped, true);
+    const remaining = (await verifyPool.query("SELECT count(*)::int AS n FROM messages")).rows[0].n;
+    assert.equal(remaining, 1, "no rows deleted while another session sweeps");
+  } finally {
+    if (holder) {
+      await holder.query("ROLLBACK").catch(() => {}); // release the xact-scoped lock
+      holder.release();
+    }
+    await holderPool.end();
+    await verifyPool.end();
+    await a.stop();
+  }
+});
+
 after(async () => {
   // nothing global to tear down; each transport stops itself.
 });

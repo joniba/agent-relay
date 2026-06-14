@@ -37,6 +37,13 @@ import pg from "pg";
  * @param {number} [opts.leaseMs]              In-flight claim lease (default 30000).
  * @param {number} [opts.maxAttempts]          Redelivery cap before dead-letter (default 5).
  * @param {number} [opts.maxPerPoll]           Messages handled per cycle (default 10).
+ * @param {number} [opts.sweepIntervalMs]      Base cleanup cadence (default 1_200_000 =
+ *   20 min; each run is jittered to ~15–30 min so concurrent sessions rarely contend).
+ * @param {number} [opts.messageTtlMs]         Delete messages older than this, any status
+ *   (default 86_400_000 = 24 h).
+ * @param {number} [opts.agentRetentionMs]     Drop agent rows not heartbeating within this
+ *   window (default 604_800_000 = 7 d; LONGER than the message TTL so durable exact-id
+ *   delivery to an away machine isn't cut short).
  * @param {(msg: string) => void} [opts.log]   Optional diagnostic sink.
  * @returns {import('../seams/transport.mjs').Transport}
  */
@@ -52,6 +59,9 @@ export function createPostgresTransport({
   leaseMs = 30000,
   maxAttempts = 5,
   maxPerPoll = 10,
+  sweepIntervalMs = 1_200_000,
+  messageTtlMs = 86_400_000,
+  agentRetentionMs = 604_800_000,
   log = () => {},
 } = {}) {
   if (!host) throw new Error("postgres transport requires a host");
@@ -60,6 +70,8 @@ export function createPostgresTransport({
 
   const staleSecs = staleMs / 1000;
   const leaseSecs = leaseMs / 1000;
+  const messageTtlSecs = messageTtlMs / 1000;
+  const agentRetentionSecs = agentRetentionMs / 1000;
 
   /** @type {pg.Pool} */
   let pool;
@@ -67,6 +79,8 @@ export function createPostgresTransport({
   let self;
   /** @type {ReturnType<typeof setInterval> | null} */
   let timer = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let sweepTimer = null;
   let draining = false;
   let stopped = false;
   let deregistered = false;
@@ -126,6 +140,66 @@ export function createPostgresTransport({
     };
     if (row.in_reply_to) message.inReplyTo = row.in_reply_to;
     return message;
+  }
+
+  // ── session-owned cleanup (jittered; only ONE session sweeps per window) ─────
+  // Every live session schedules a sweep, but `pg_try_advisory_xact_lock` makes
+  // all-but-one a cheap no-op per window. No always-on infra (RD-CM: cleanup
+  // waits for the next live session if none is up — acceptable at single-user
+  // scale). Exposed on the transport so the integration suite can drive it.
+  async function sweep() {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Try-lock (non-blocking): if another session already holds it this window,
+      // we no-op. Released automatically at COMMIT/ROLLBACK (xact-scoped).
+      const got = (
+        await client.query("SELECT pg_try_advisory_xact_lock($1) AS ok", [SWEEP_LOCK_KEY])
+      ).rows[0].ok;
+      if (!got) {
+        await client.query("ROLLBACK");
+        log("postgres sweep: skipped (another session holds the sweep lock)");
+        return { swept: false, skipped: true };
+      }
+      // Messages older than the TTL go (any status — pending/dead alike). `ts` is
+      // the sender's timestamp; at a 24 h window cross-machine skew is immaterial.
+      const msgs = await client.query(
+        "DELETE FROM messages WHERE ts < now() - make_interval(secs => $1)",
+        [messageTtlSecs],
+      );
+      // Known recipients are retained LONGER than messages so durable exact-id
+      // delivery to an away machine isn't cut short; drop only long-stale rows.
+      const agents = await client.query(
+        "DELETE FROM agents WHERE last_heartbeat < now() - make_interval(secs => $1)",
+        [agentRetentionSecs],
+      );
+      await client.query("COMMIT");
+      log(`postgres sweep: removed ${msgs.rowCount} message(s), ${agents.rowCount} stale agent(s)`);
+      return { swept: true, messages: msgs.rowCount, agents: agents.rowCount };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      log(`postgres sweep error: ${err.message}`);
+      return { swept: false, error: err.message };
+    } finally {
+      client.release();
+    }
+  }
+
+  function scheduleSweep() {
+    if (stopped) return;
+    // Long, randomized interval (~15–30 min for the 20 min base) so concurrent
+    // sessions rarely contend; the try-lock makes the loser a cheap no-op.
+    const delay = sweepIntervalMs * (0.75 + Math.random() * 0.75);
+    sweepTimer = setTimeout(async () => {
+      if (stopped) return;
+      try {
+        await sweep();
+      } catch {
+        // sweep() logs its own errors; cleanup must never crash the loop.
+      }
+      scheduleSweep();
+    }, delay);
+    if (typeof sweepTimer.unref === "function") sweepTimer.unref();
   }
 
   return {
@@ -203,7 +277,10 @@ export function createPostgresTransport({
           )
         ).rows[0];
       }
-      if (!recipient) return { accepted: false, error: `no such agent: ${message.to}` };
+      if (!recipient) {
+        log(`postgres: send rejected — no live recipient for "${message.to}"`);
+        return { accepted: false, error: `no such agent: ${message.to}` };
+      }
 
       await pool.query(
         `INSERT INTO messages (id, from_name, to_target, recipient_id, body, ts, in_reply_to, meta, status)
@@ -281,6 +358,7 @@ export function createPostgresTransport({
                     "UPDATE messages SET status = 'dead', attempts = $1, lease_until = NULL WHERE id = $2",
                     [attempts, row.id],
                   );
+                  log(`postgres: message ${row.id} dead-lettered after ${attempts} attempt(s)`);
                 } else {
                   await pool.query(
                     "UPDATE messages SET attempts = $1, lease_until = NULL WHERE id = $2",
@@ -302,13 +380,20 @@ export function createPostgresTransport({
 
       timer = setInterval(() => void drain(), pollIntervalMs);
       if (typeof timer.unref === "function") timer.unref();
+      scheduleSweep();
     },
+
+    sweep,
 
     async stop() {
       stopped = true;
       if (timer) {
         clearInterval(timer);
         timer = null;
+      }
+      if (sweepTimer) {
+        clearTimeout(sweepTimer);
+        sweepTimer = null;
       }
       while (draining) await new Promise((r) => setTimeout(r, 5));
       if (pool) {
@@ -326,6 +411,7 @@ export function createPostgresTransport({
 // Advisory-lock keys (arbitrary, stable constants; distinct per concern).
 const MIGRATE_LOCK_KEY = 498061001;
 const ALIAS_LOCK_KEY = 498061002;
+const SWEEP_LOCK_KEY = 498061003;
 
 /** The schema version this transport build expects. */
 export const TARGET_SCHEMA = 1;

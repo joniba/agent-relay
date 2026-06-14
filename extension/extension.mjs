@@ -7,12 +7,9 @@
 //
 // Requires `copilot --experimental` (extensions are gated behind it) and Node 22+.
 
-import { hostname } from "node:os";
-
 import { joinSession } from "@github/copilot-sdk/extension";
-import { createConfig } from "./config.mjs";
-import { createRelay } from "./core/relay.mjs";
-import { createCopilotSink } from "./sinks/copilot.mjs";
+import { createConfig, createFallbackConfig } from "./config.mjs";
+import { startRelaySession } from "./bootstrap.mjs";
 import { formatRoster } from "./roster.mjs";
 
 // Assigned during bootstrap (after joinSession resolves). The tool/hook handlers
@@ -126,22 +123,36 @@ async function shutdown() {
 
 const session = await joinSession({ tools, hooks });
 
+// Route the transport's diagnostics through the session log (observability).
+// Fire-and-forget, but never let a logging failure escape as an unhandled
+// rejection — these fire from background poll/sweep timers too, outside any
+// try/catch (mirrors the guarding around session.log/sink.log elsewhere).
+const relayLog = (msg, opts) => {
+  try {
+    Promise.resolve(session.log?.(msg, opts)).catch(() => {});
+  } catch {
+    /* a logging failure must never disrupt the relay */
+  }
+};
+
+// Fall back to the local SQLite transport ONLY when the primary is the remote
+// (cross-machine) substrate — falling local→local would just retry the same
+// failing store and makes the "cross-machine unavailable" log accurate.
+const fallbackFactory =
+  process.env.AGENT_RELAY_TRANSPORT === "postgres" ? createFallbackConfig : undefined;
+
 try {
-  const config = createConfig();
-  transport = config.transport;
-  self = await config.identity.resolve(session);
-  // Display-only device name (the machine this session runs on). Surfaced in the
-  // cross-machine roster (e.g. "gull (my-laptop)") so a human can tell machines
-  // apart; NEVER used for addressing or collision. A transport that doesn't store
-  // it (the local SQLite default) simply ignores it.
-  self.deviceName = process.env.AGENT_RELAY_HOST || hostname();
-  await transport.init({ self, credentials: config.credentials });
-  await transport.register(self);
-  // The Sink is the runtime-specific seam: this Copilot entry wakes via
-  // session.send(); an ACP entry would build an ACP sink here instead.
-  const sink = createCopilotSink(session);
-  relay = createRelay({ sink, self, transport, interceptors: config.interceptors });
-  relay.start();
+  // All substrate/fallback composition lives in config.mjs; the entry only
+  // supplies the session + log and performs the boot via the testable bootstrap.
+  const started = await startRelaySession({
+    session,
+    createConfig: () => createConfig({ log: relayLog }),
+    fallbackFactory,
+    log: relayLog,
+  });
+  relay = started.relay;
+  self = started.self;
+  transport = started.transport;
   ready = true;
   await session.log?.(`agent-relay: registered as "${self.name}" — ready`);
   // If a teardown was requested while we were booting, honor it now.
