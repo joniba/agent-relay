@@ -1,11 +1,11 @@
 /**
  * Identity seam — owns "who am I" for this session.
  *
- * The core asks the provider once at startup (and the shape is async so a future
- * adapter can resolve a late-arriving name, e.g. an external alias — that
- * behavior is parked, but the seam allows it without a core change).
+ * The core asks the provider once at startup. `resolve` is async so an adapter
+ * may do I/O; the default (`identity/local-alias.mjs`) is pure + synchronous.
  *
- * Default: `identity/folder-name.mjs` (name = launch-folder leaf, id = sessionId).
+ * Default: `identity/local-alias.mjs` (a stone-style alias generated locally
+ * from the session id; collisions resolved by the registry — see `candidates`).
  *
  * @typedef {object} IdentityProvider
  * @property {(context: *) => Promise<AgentIdentity>} resolve
@@ -14,17 +14,18 @@
  *   (the Copilot entry passes a `SessionLike`; an ACP entry would pass its own
  *   context to an ACP identity adapter). `id` MUST be stable for the session's
  *   lifetime; `name` is the human-friendly address.
- *
- * Future (parked): an optional `onChange(cb)` could let a provider refresh a
- * late-arriving/changed name at runtime (e.g. an external alias) and trigger a
- * re-register. The seam is async to leave room for this without a core change.
  */
 
 /**
  * A session's identity.
  * @typedef {object} AgentIdentity
  * @property {string} id     Stable unique id (default: the Copilot sessionId).
- * @property {string} name   Human-friendly, addressable name (default: cwd leaf).
+ * @property {string} name   Human-friendly, addressable name.
+ * @property {string[]} [candidates]
+ *   OPTIONAL ordered name preferences (most-preferred first; `name` === the
+ *   first). When present, a registry MAY register this session under the first
+ *   candidate not already taken by another session (collision avoidance) and
+ *   reflect the chosen name back on `name`. When absent, `name` is used as-is.
  */
 
 /**
