@@ -118,7 +118,7 @@ if ($mode -eq 'junction') { Write-Host "  Source: $source  (a later ``git pull``
 
 # --- Statusline: point Copilot's single statusLine slot at agent-relay --------
 # agent-relay shows THIS session's locally-generated alias below the prompt.
-# This replaces whatever statusLine command was configured (e.g. magic's).
+# This replaces whatever statusLine command was previously configured.
 if (-not $NoStatusline) {
     $statusScript = Join-Path $dest 'bin\agent-relay-statusline.mjs'
     if (Test-Path -LiteralPath $statusScript) {

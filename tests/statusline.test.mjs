@@ -22,7 +22,7 @@ test("compose wraps a name in brackets, empty otherwise", () => {
   assert.equal(compose(null), "");
 });
 
-test("lookupName returns the registered name for a session id", () => {
+test("lookupName returns the registered name for a session id", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ar-sl-"));
   const dbPath = join(dir, "agent-relay.db");
   try {
@@ -32,10 +32,10 @@ test("lookupName returns the registered name for a session id", () => {
       .run("sess-1", "cedar", "t", "t");
     db.close();
 
-    assert.equal(lookupName("sess-1", dbPath), "cedar");
-    assert.equal(lookupName("nobody", dbPath), null);
-    assert.equal(lookupName("sess-1", join(dir, "missing.db")), null); // missing DB → null
-    assert.equal(lookupName("", dbPath), null);
+    assert.equal(await lookupName("sess-1", dbPath), "cedar");
+    assert.equal(await lookupName("nobody", dbPath), null);
+    assert.equal(await lookupName("sess-1", join(dir, "missing.db")), null); // missing DB → null
+    assert.equal(await lookupName("", dbPath), null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -15,15 +15,14 @@
  *   - Unknown session (agent-relay not running / not registered yet) or any
  *     error → emit NOTHING (Copilot's own statusline shows). Never throw.
  *
- * Unlike magic's statusline (which reads magic's cloud-derived alias cache),
- * this reads agent-relay's OWN registry — the name is generated locally and is
- * available the instant the session registers, with no cloud and no magic.
+ * The name is generated locally and is available the instant the session
+ * registers (read here from agent-relay's own registry), with no external
+ * service.
  *
  * Performance: a single indexed lookup on a tiny table; must stay well under
  * 100ms. Failure isolation: ANY error → empty line, exit 0.
  */
 
-import { DatabaseSync } from "node:sqlite";
 import { existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -45,12 +44,15 @@ export function resolveDbPath() {
  * Look up the registered name for a session id in the agent-relay registry.
  * Returns the name, or null when unknown / unavailable. Never throws. Opens
  * read-write (so a WAL store is handled), but only ever SELECTs; guarded by an
- * existence check so it never CREATES the store.
+ * existence check so it never CREATES the store. `node:sqlite` is imported
+ * dynamically so a runtime without it degrades to null rather than throwing at
+ * module load (this script runs under whatever `node` is on PATH).
  */
-export function lookupName(sessionId, dbPath = resolveDbPath()) {
+export async function lookupName(sessionId, dbPath = resolveDbPath()) {
   if (!sessionId || !existsSync(dbPath)) return null;
   let db;
   try {
+    const { DatabaseSync } = await import("node:sqlite");
     db = new DatabaseSync(dbPath);
     const row = db.prepare("SELECT name FROM agents WHERE id = ?").get(sessionId);
     return row && typeof row.name === "string" ? row.name : null;
@@ -76,9 +78,11 @@ async function readStdinJson() {
   return new Promise((resolve) => {
     const chunks = [];
     let done = false;
+    let timer;
     const finish = (v) => {
       if (done) return;
       done = true;
+      clearTimeout(timer); // don't let the rescue timer keep the process alive
       resolve(v);
     };
     process.stdin.on("data", (c) => chunks.push(c));
@@ -91,7 +95,7 @@ async function readStdinJson() {
       }
     });
     process.stdin.on("error", () => finish(null));
-    setTimeout(() => finish(null), 500);
+    timer = setTimeout(() => finish(null), 500);
   });
 }
 
@@ -104,7 +108,7 @@ async function main() {
   }
   let name = null;
   try {
-    if (input && typeof input.session_id === "string") name = lookupName(input.session_id);
+    if (input && typeof input.session_id === "string") name = await lookupName(input.session_id);
   } catch {
     /* fall through to silent */
   }

@@ -1,11 +1,11 @@
-// Small, friendly wordlist for locally-generated session aliases (stone/kara
-// style). ~200 short, distinct, easy-to-say words. agent-relay's OWN list — no
-// dependency on magic. Order is irrelevant (selection is by hash, not index).
+// Small, friendly wordlist for locally-generated session aliases (e.g. "cedar",
+// "gull"). ~200 short, distinct, easy-to-say words. Order is irrelevant
+// (selection is by hash, not index).
 export const WORDS = [
   "acorn", "agate", "alder", "amber", "ant", "arch", "ash", "aspen",
   "bark", "basil", "bay", "beam", "bear", "bee", "bell", "birch",
   "bison", "bloom", "bolt", "briar", "brook", "bud", "cactus", "cedar",
-  "clay", "cliff", "cloud", "clove", "cobble", "comet", "coral", "cove",
+  "clay", "cliff", "clover", "clove", "cobble", "comet", "coral", "cove",
   "crag", "crane", "creek", "crest", "crow", "cub", "dale", "dawn",
   "deer", "delta", "dew", "dove", "drift", "dune", "dusk", "eagle",
   "elk", "elm", "ember", "fawn", "fennel", "fern", "fig", "fin",

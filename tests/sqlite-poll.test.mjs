@@ -80,6 +80,24 @@ test("register: no candidates → name used as-is (duplicates allowed for explic
   }
 });
 
+test("register: a STALE session's name does not reserve a candidate", async () => {
+  const { dbPath, cleanup } = tempDb();
+  // staleMs=1 → the first session goes stale almost immediately.
+  const t = createSqlitePollTransport({ dbPath, staleMs: 1 });
+  try {
+    await t.init({ self: { id: "old", name: "stone" }, credentials });
+    const old = { id: "old", name: "stone", candidates: ["stone", "stork"] };
+    await t.register(old);
+    await new Promise((r) => setTimeout(r, 10)); // let 'old' go stale
+    const fresh = { id: "new", name: "stone", candidates: ["stone", "stork"] };
+    await t.register(fresh);
+    assert.equal(fresh.name, "stone", "stale peer should not reserve 'stone'");
+  } finally {
+    await t.stop();
+    cleanup();
+  }
+});
+
 test("two instances over one DB: A.send → B receives the same message", async () => {
   const { dbPath, cleanup } = tempDb();
   const alice = createSqlitePollTransport({ dbPath, pollIntervalMs: 15 });

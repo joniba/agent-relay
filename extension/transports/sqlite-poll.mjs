@@ -87,10 +87,14 @@ export function createSqlitePollTransport({
       self = identity;
       const ts = nowIso();
       // Collision avoidance: if the identity supplies ordered `candidates`,
-      // register under the FIRST one not already held by another session, and
+      // register under the FIRST one not held by another ACTIVE session, and
       // reflect the chosen name back on `identity.name` (the core reads it
       // live). Done inside a write transaction so the read-taken + insert is
-      // atomic against concurrent registrations (magic's withLock equivalent).
+      // atomic against concurrent registrations. Only non-stale sessions reserve
+      // a name (same staleness cutoff as listAgents), so a crashed session's
+      // name frees up. If every candidate is taken (>= candidates.length active
+      // peers — rare), fall back to the first preference; id-addressing still
+      // disambiguates.
       const candidates =
         Array.isArray(identity.candidates) && identity.candidates.length
           ? identity.candidates
@@ -99,8 +103,12 @@ export function createSqlitePollTransport({
       try {
         let name = identity.name;
         if (candidates) {
+          const cutoff = new Date(Date.now() - staleMs).toISOString();
           const taken = new Set(
-            db.prepare("SELECT name FROM agents WHERE id != ?").all(identity.id).map((r) => r.name),
+            db
+              .prepare("SELECT name FROM agents WHERE id != ? AND last_heartbeat >= ?")
+              .all(identity.id, cutoff)
+              .map((r) => r.name),
           );
           name = candidates.find((c) => !taken.has(c)) ?? candidates[0];
           identity.name = name;

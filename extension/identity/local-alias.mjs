@@ -3,20 +3,19 @@ import { WORDS } from "./wordlist.mjs";
 
 /**
  * Local wordlist IdentityProvider — generates a short, friendly, STABLE alias
- * (stone/kara-style) for this session purely from its LOCAL session id. No
- * cloud, no network, no dependency on magic: the alias is a deterministic
- * function of the session id, so it resolves **synchronously at boot** with no
- * lag. This is agent-relay owning its own identity (it does not read magic's
- * cloud-derived aliases).
+ * (e.g. "cedar", "gull") for this session purely from its LOCAL session id. No
+ * network and no external service: the alias is a deterministic function of the
+ * session id, so it resolves **synchronously at boot** with no lag. agent-relay
+ * owns its identity locally.
  *
  * Precedence: explicit `AGENT_RELAY_NAME` → generated wordlist alias.
  *
  * Name COLLISIONS between sessions are resolved by the registry: `resolve` hands
  * back the full ordered preference list (`candidates`), and the transport's
  * `register` picks the first candidate not already taken by another session,
- * atomically (mirroring magic's locked first-free selection). So distinct
- * sessions always get distinct names; the authoritative name is the registered
- * one (read it back from the registry rather than recomputing).
+ * atomically (under a write transaction). So distinct sessions always get
+ * distinct names; the authoritative name is the registered one (read it back
+ * from the registry rather than recomputing).
  *
  * @param {object} [opts]
  * @param {string[]} [opts.words]  Override the wordlist (default: bundled WORDS).
@@ -41,7 +40,7 @@ export function createLocalAliasIdentity({ words = WORDS, deps = {} } = {}) {
  * The full wordlist ordered by `sha256(id|word)` (ties broken lexicographically)
  * — this session's name preferences, most-preferred first. A pure permutation of
  * `words`. The registry uses this to pick the first un-taken name (collision
- * avoidance), mirroring magic's `orderedCandidates` + first-free selection.
+ * avoidance).
  *
  * @param {string} id
  * @param {string[]} [words]
