@@ -68,7 +68,8 @@ overrides for the defaults:
 
 ## Extending (the seams)
 
-Swap any adapter by editing **only** `config.mjs` — the core never changes (OCP):
+Swap any adapter by editing **only** `config.mjs` (or, for the Sink, the entry) — the core never
+changes (OCP):
 
 - **Transport** (`extension/seams/transport.mjs`) — storage + delivery. Default:
   `transports/sqlite-poll.mjs`. A cloud-store or push transport is a drop-in replacement
@@ -79,6 +80,10 @@ Swap any adapter by editing **only** `config.mjs` — the core never changes (OC
 - **Interceptor** (`seams/interceptor.mjs`) — middleware on send/receive and the wake
   prompt. The core ships **none**; this is where guardrails (authority, rate-limit,
   loop/hop guards, content filters) go.
+- **Sink** (`seams/sink.mjs`) — *which agent runtime a delivered message wakes.* Default:
+  `sinks/copilot.mjs` (wakes a Copilot CLI session via `session.send()`). The core is **not** locked
+  to interactive Copilot user-sessions — an **ACP-managed session** (or any runtime) is a drop-in
+  `sinks/<runtime>.mjs` paired with a matching entry, with no core change.
 
 ## License
 

@@ -10,6 +10,7 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { createConfig } from "./config.mjs";
 import { createRelay } from "./core/relay.mjs";
+import { createCopilotSink } from "./sinks/copilot.mjs";
 
 // Assigned during bootstrap (after joinSession resolves). The tool/hook handlers
 // below close over these and tolerate being called before bootstrap completes.
@@ -130,7 +131,10 @@ try {
   self = await config.identity.resolve(session);
   await transport.init({ self, credentials: config.credentials });
   await transport.register(self);
-  relay = createRelay({ session, self, transport, interceptors: config.interceptors });
+  // The Sink is the runtime-specific seam: this Copilot entry wakes via
+  // session.send(); an ACP entry would build an ACP sink here instead.
+  const sink = createCopilotSink(session);
+  relay = createRelay({ sink, self, transport, interceptors: config.interceptors });
   relay.start();
   ready = true;
   await session.log?.(`agent-relay: registered as "${self.name}" — ready`);

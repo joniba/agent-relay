@@ -11,17 +11,19 @@ import {
 
 // ─── Test doubles ────────────────────────────────────────────────
 
-class FakeSession {
-  constructor(sessionId = "sess-self") {
-    this.sessionId = sessionId;
-    this.sends = [];
+class FakeSink {
+  constructor() {
+    this.wakes = []; // rendered prompt strings the core asked to wake with
     this.logs = [];
+    this.failWake = false;
+    this.failLog = false;
   }
-  async send(arg) {
-    this.sends.push(arg);
-    return "wake-msg-id";
+  async wake(prompt) {
+    if (this.failWake) throw new Error("wake boom");
+    this.wakes.push(prompt);
   }
   async log(message, options) {
+    if (this.failLog) throw new Error("log boom");
     this.logs.push({ message, options });
   }
 }
@@ -63,10 +65,10 @@ class FakeTransport {
 const SELF = { id: "sess-self", name: "alice" };
 
 function makeRelay(interceptors = []) {
-  const session = new FakeSession(SELF.id);
+  const sink = new FakeSink();
   const transport = new FakeTransport();
-  const relay = createRelay({ session, self: SELF, transport, interceptors });
-  return { relay, session, transport };
+  const relay = createRelay({ sink, self: SELF, transport, interceptors });
+  return { relay, sink, transport };
 }
 
 // ─── message.mjs ─────────────────────────────────────────────────
@@ -123,16 +125,14 @@ test("sendMessage surfaces a transport rejection", async () => {
 
 // ─── inbound wake ────────────────────────────────────────────────
 
-test("inbound message wakes the session with the default prompt", async () => {
-  const { relay, session, transport } = makeRelay();
+test("inbound message wakes the agent with the default prompt", async () => {
+  const { relay, sink, transport } = makeRelay();
   relay.start();
   const msg = createMessage({ from: "bob", to: "alice", body: "hello there" });
   await transport.deliver(msg);
-  assert.equal(session.sends.length, 1);
-  const arg = session.sends[0];
-  assert.equal(arg.mode, "immediate");
-  assert.match(arg.prompt, /bob/);
-  assert.match(arg.prompt, /hello there/);
+  assert.equal(sink.wakes.length, 1);
+  assert.match(sink.wakes[0], /bob/);
+  assert.match(sink.wakes[0], /hello there/);
 });
 
 // ─── interceptors ────────────────────────────────────────────────
@@ -145,12 +145,12 @@ test("onSend interceptor can drop a message (transport not called)", async () =>
   assert.equal(transport.sent.length, 0);
 });
 
-test("onReceive interceptor can drop a message (session not woken)", async () => {
+test("onReceive interceptor can drop a message (agent not woken)", async () => {
   const dropper = { onReceive(_m, _next) {} };
-  const { relay, session, transport } = makeRelay([dropper]);
+  const { relay, sink, transport } = makeRelay([dropper]);
   relay.start();
   await transport.deliver(createMessage({ from: "bob", to: "alice", body: "x" }));
-  assert.equal(session.sends.length, 0);
+  assert.equal(sink.wakes.length, 0);
 });
 
 test("onSend interceptor can transform the message", async () => {
@@ -204,10 +204,10 @@ test("createMessage carries an opaque meta bag", () => {
 
 test("interceptor renderPrompt overrides the default wake prompt", async () => {
   const custom = { renderPrompt: (m) => `CUSTOM:${m.body}` };
-  const { relay, session, transport } = makeRelay([custom]);
+  const { relay, sink, transport } = makeRelay([custom]);
   relay.start();
   await transport.deliver(createMessage({ from: "bob", to: "alice", body: "zap" }));
-  assert.equal(session.sends[0].prompt, "CUSTOM:zap");
+  assert.equal(sink.wakes[0], "CUSTOM:zap");
 });
 
 test("renderPrompt falls back to default when interceptor returns null", () => {
@@ -239,10 +239,10 @@ test("listAgents proxies the transport and flags self", async () => {
 // ─── lifecycle ───────────────────────────────────────────────────
 
 test("inbound wake failure propagates so the transport can retry", async () => {
-  const session = new FakeSession(SELF.id);
+  const sink = new FakeSink();
   const transport = new FakeTransport();
-  session.send = async () => { throw new Error("wake boom"); };
-  const relay = createRelay({ session, self: SELF, transport, interceptors: [] });
+  sink.failWake = true;
+  const relay = createRelay({ sink, self: SELF, transport, interceptors: [] });
   relay.start();
   await assert.rejects(
     () => transport.deliver(createMessage({ from: "bob", to: "alice", body: "x" })),
@@ -252,12 +252,26 @@ test("inbound wake failure propagates so the transport can retry", async () => {
 
 test("poison inbound (onReceive throws) is consumed, not retried", async () => {
   const poison = { onReceive() { throw new Error("guardrail exploded"); } };
-  const { relay, session, transport } = makeRelay([poison]);
+  const { relay, sink, transport } = makeRelay([poison]);
   relay.start();
   // Resolves (consumed) — does NOT reject (which would trigger redelivery).
   await transport.deliver(createMessage({ from: "bob", to: "alice", body: "x" }));
-  assert.equal(session.sends.length, 0);
-  assert.ok(session.logs.some((l) => /dropping message/.test(l.message)));
+  assert.equal(sink.wakes.length, 0);
+  assert.ok(sink.logs.some((l) => /dropping message/.test(l.message)));
+});
+
+test("poison inbound whose log ALSO fails is still consumed, not retried", async () => {
+  // A failing log must never escalate a consumed poison message into a
+  // wake-style rejection that the transport would redeliver.
+  const poison = { onReceive() { throw new Error("guardrail exploded"); } };
+  const sink = new FakeSink();
+  sink.failLog = true;
+  const transport = new FakeTransport();
+  const relay = createRelay({ sink, self: SELF, transport, interceptors: [poison] });
+  relay.start();
+  // Resolves (consumed) despite the log throwing — does NOT reject.
+  await transport.deliver(createMessage({ from: "bob", to: "alice", body: "x" }));
+  assert.equal(sink.wakes.length, 0);
 });
 
 test("stop() stops the transport", async () => {

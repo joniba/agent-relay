@@ -8,15 +8,16 @@ import { createRelay } from "../extension/core/relay.mjs";
 import { createSqlitePollTransport } from "../extension/transports/sqlite-poll.mjs";
 import { createFolderNameIdentity } from "../extension/identity/folder-name.mjs";
 import { createNoneCredentials } from "../extension/credentials/none.mjs";
+import { createCopilotSink } from "../extension/sinks/copilot.mjs";
 
 // Wire a participant exactly as extension.mjs does (sans the SDK): resolve
-// identity → init+register transport → createRelay → start. The "session" is a
-// fake whose send() is the wake spy.
+// identity → init+register transport → build the sink → createRelay → start.
+// The fake Copilot session records the prompts it's woken with.
 async function bootstrap({ dbPath, name, sessionId }) {
+  const wakes = [];
   const session = {
     sessionId,
-    wakes: [],
-    async send(arg) { this.wakes.push(arg); return "ok"; },
+    async send(arg) { wakes.push(arg); return "ok"; },
     async log() {},
   };
   const identity = createFolderNameIdentity({ nameOverride: name });
@@ -25,9 +26,10 @@ async function bootstrap({ dbPath, name, sessionId }) {
   const self = await identity.resolve(session);
   await transport.init({ self, credentials });
   await transport.register(self);
-  const relay = createRelay({ session, self, transport, interceptors: [] });
+  const sink = createCopilotSink(session);
+  const relay = createRelay({ sink, self, transport, interceptors: [] });
   relay.start();
-  return { session, relay, transport, self };
+  return { session, wakes, relay, transport, self };
 }
 
 async function waitFor(predicate, { timeoutMs = 1500, stepMs = 10 } = {}) {
@@ -56,17 +58,17 @@ test("end-to-end: A messages B → B wakes; B replies → A wakes", async () => 
     assert.equal(sent.ok, true);
 
     // B wakes with the message (no human action).
-    assert.ok(await waitFor(() => bob.session.wakes.length > 0), "bob did not wake");
-    assert.match(bob.session.wakes[0].prompt, /alice/);
-    assert.match(bob.session.wakes[0].prompt, /build status/);
-    assert.equal(bob.session.wakes[0].mode, "immediate");
+    assert.ok(await waitFor(() => bob.wakes.length > 0), "bob did not wake");
+    assert.match(bob.wakes[0].prompt, /alice/);
+    assert.match(bob.wakes[0].prompt, /build status/);
+    assert.equal(bob.wakes[0].mode, "immediate");
 
     // B replies → A wakes.
     const reply = await bob.relay.sendMessage({ to: "alice", content: "green", inReplyTo: sent.id });
     assert.equal(reply.ok, true);
-    assert.ok(await waitFor(() => alice.session.wakes.length > 0), "alice did not wake on reply");
-    assert.match(alice.session.wakes[0].prompt, /bob/);
-    assert.match(alice.session.wakes[0].prompt, /green/);
+    assert.ok(await waitFor(() => alice.wakes.length > 0), "alice did not wake on reply");
+    assert.match(alice.wakes[0].prompt, /bob/);
+    assert.match(alice.wakes[0].prompt, /green/);
   } finally {
     if (alice) { await alice.transport.deregister(alice.self); await alice.relay.stop(); }
     if (bob) { await bob.transport.deregister(bob.self); await bob.relay.stop(); }
