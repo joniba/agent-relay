@@ -164,7 +164,6 @@ export function createPostgresTransport({
       ).rows[0].ok;
       if (!got) {
         await client.query("ROLLBACK");
-        log("postgres sweep: skipped (another session holds the sweep lock)");
         return { swept: false, skipped: true };
       }
       // Messages older than the TTL go (any status — pending/dead alike). `ts` is
@@ -180,7 +179,11 @@ export function createPostgresTransport({
         [agentRetentionSecs],
       );
       await client.query("COMMIT");
-      log(`postgres sweep: removed ${msgs.rowCount} message(s), ${agents.rowCount} stale agent(s)`);
+      // Only log when the sweep actually removed something — a no-op sweep every
+      // cycle is just noise in the session timeline.
+      if (msgs.rowCount > 0 || agents.rowCount > 0) {
+        log(`postgres sweep: removed ${msgs.rowCount} message(s), ${agents.rowCount} stale agent(s)`);
+      }
       return { swept: true, messages: msgs.rowCount, agents: agents.rowCount };
     } catch (err) {
       await client.query("ROLLBACK").catch(() => {});

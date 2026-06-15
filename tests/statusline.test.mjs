@@ -1,15 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
 
 import {
   stripControlChars,
   compose,
-  lookupName,
+  resolveName,
 } from "../extension/bin/agent-relay-statusline.mjs";
+import { aliasFor } from "../extension/identity/local-alias.mjs";
 
 test("stripControlChars removes C0 controls and DEL", () => {
   assert.equal(stripControlChars("ab\x00c\x1b[31m\x7f"), "abc[31m");
@@ -22,21 +19,19 @@ test("compose wraps a name in brackets, empty otherwise", () => {
   assert.equal(compose(null), "");
 });
 
-test("lookupName returns the registered name for a session id", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "ar-sl-"));
-  const dbPath = join(dir, "agent-relay.db");
-  try {
-    const db = new DatabaseSync(dbPath);
-    db.exec("CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, registered_at TEXT, last_heartbeat TEXT)");
-    db.prepare("INSERT INTO agents (id, name, registered_at, last_heartbeat) VALUES (?,?,?,?)")
-      .run("sess-1", "cedar", "t", "t");
-    db.close();
+test("resolveName: deterministic wordlist alias from the session id (matches identity)", () => {
+  // Same derivation the identity provider uses → the statusline shows the same
+  // alias the session registered under (no DB read, works for any transport).
+  assert.equal(resolveName("sess-1", {}), aliasFor("sess-1"));
+  assert.match(resolveName("sess-1", {}), /^[a-z]+$/);
+});
 
-    assert.equal(await lookupName("sess-1", dbPath), "cedar");
-    assert.equal(await lookupName("nobody", dbPath), null);
-    assert.equal(await lookupName("sess-1", join(dir, "missing.db")), null); // missing DB → null
-    assert.equal(await lookupName("", dbPath), null);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+test("resolveName: AGENT_RELAY_NAME override wins", () => {
+  assert.equal(resolveName("sess-1", { AGENT_RELAY_NAME: "tia" }), "tia");
+});
+
+test("resolveName: no session id → null (statusline stays empty)", () => {
+  assert.equal(resolveName("", {}), null);
+  assert.equal(resolveName(null, {}), null);
+  assert.equal(resolveName(undefined, {}), null);
 });
