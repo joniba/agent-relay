@@ -34,22 +34,27 @@ to the public repo. Findings are inputs, not orders.
 
 ---
 
-## Phase 1 — Canonical data dir + sqlite relocation
+## Phase 1 — Canonical data dir + sqlite relocation  ✅ DONE
 
 **Goal:** give runtime state a real home outside the install dir; unblock the log; move
 sqlite without touching the pg path. Independently shippable.
 
-- [ ] `extension/storage/paths.mjs`: pure `resolveDataDir(env, platform)` ->
+- [x] `extension/storage/paths.mjs`: pure `resolveDataDir({env,platform,homedir})` ->
       `%LOCALAPPDATA%\agent-relay` (Win) / `~/Library/Application Support/agent-relay`
-      (mac) / `$XDG_DATA_HOME|~/.local/share/agent-relay` (Linux); honors
-      `AGENT_RELAY_DATA_DIR` override. `dataFile(name)` helper.
-- [ ] `config.mjs` `localSlice()`: default DB -> `<dataDir>/agent-relay.db`; one-time
-      migration of an existing in-install `agent-relay.db` when the new path is absent;
-      keep the `AGENT_RELAY_DB` override. pg branch untouched.
-- [ ] Smoke: `node --test` — `resolveDataDir` per-platform + env override; DB-path
-      resolution + one-time migration (fake fs); assert the pg branch is unaffected.
-- [ ] Gate: code-review · SOLID
-- [ ] Committed
+      (mac) / `$XDG_DATA_HOME|~/.local/share/agent-relay` (Linux); `AGENT_RELAY_DATA_DIR`
+      override; `dataFile()` + `ensureDataDir()`.
+- [x] `extension/storage/local-db.mjs`: `migrateLocalDbOnce()` — crash-safe one-time
+      relocation via SQLite `VACUUM INTO` (consistent single-file snapshot, no WAL/SHM) +
+      atomic create-if-absent `linkSync` commit. (Split out of paths.mjs per review: a
+      naive live-WAL file-copy was unsafe; see Issues 1-2 below.)
+- [x] `config.mjs` `localSlice()`: default DB -> `<dataDir>/agent-relay.db`; best-effort
+      provisioning + migration wrapped in try/catch, degrades to the legacy path on any fs
+      error (boot resilience). `AGENT_RELAY_DB` override returns early. pg branch untouched.
+- [x] Smoke: `node --test` — 118 tests, 0 fail (8 paths + 5 local-db incl. a real-sqlite
+      round-trip).
+- [x] Gate: code-review (Issues 1-3 resolved; R1 temp-leak + R2 peer-race hardened via
+      linkSync + try/finally) · SOLID (clean)
+- [x] Committed
 
 ## Phase 2 — Rolling file log
 
