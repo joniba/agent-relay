@@ -99,17 +99,23 @@ retried. The behavioral core.
       (clean; timeout-cancellation residual accepted via fresh-instance containment)
 - [x] Committed
 
-## Phase 4 — Docs + installer
+## Phase 4 — Docs + installer  ✅ DONE
 
-**Goal:** document the new behavior + the data dir; let the installer drop the
-now-unneeded lock dance (back-compat aware).
+**Goal:** document the new behavior + the data dir; keep the installer migration-safe.
 
-- [ ] README + `.env.example`: `AGENT_RELAY_DATA_DIR`; no-silent-fallback + retry +
-      inactive-state/how-to-switch; log location + retention.
-- [ ] `install.ps1`: simplify the `*.db*`-preserve logic now that state lives in the data
-      dir (keep a migration-safe path for existing installs).
-- [ ] Gate: rubber-duck (docs) · human-reviewer (setup journey) · code-review (installer)
-- [ ] Committed
+- [x] README + `.env.example`: added `AGENT_RELAY_DATA_DIR` + a "Data & logs" note (per-OS data
+      dir, rolling log location/retention, first-run migration); rewrote the cross-machine
+      "Resilience" section + the install-failure note to no-silent-fallback → retry → INACTIVE
+      → "fix + restart, or unset AGENT_RELAY_TRANSPORT + restart"; fixed stale "single global
+      install" mesh wording + the Linux `~/.local/share` fallback.
+- [x] `install.ps1`: kept the `*.db*`-preserve (now the migration-safe path for a legacy
+      in-install DB) — updated its comments to the data-dir reality (comment-only; the lock
+      dance is still needed for the transition window, so NOT dropped). Parses clean.
+- [x] Gate: rubber-duck (docs — found a Blocking stale "falls back to local" section + 3 clarity
+      items, all fixed → re-confirmed "Looks solid") · human-reviewer (LOCAL install journey
+      PASSED end-to-end on an isolated COPILOT_HOME; its HIGH was a pre-fix stale snapshot of the
+      same section, already resolved). No code-review: installer change is comment-only.
+- [x] Committed
 
 ---
 

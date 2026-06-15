@@ -107,7 +107,8 @@ overrides for the defaults:
 | Variable | Effect | Default |
 |---|---|---|
 | `AGENT_RELAY_NAME` | This session's mesh name | wordlist alias from session id |
-| `AGENT_RELAY_DB`   | Path to the shared SQLite store | `agent-relay.db` beside the extension |
+| `AGENT_RELAY_DB`   | Path to the local SQLite store | `agent-relay.db` in the data dir (below) |
+| `AGENT_RELAY_DATA_DIR` | Directory for local state + rolling diagnostic logs | per-user OS data dir (e.g. `%LOCALAPPDATA%\agent-relay`) |
 | `AGENT_RELAY_TRANSPORT` | `postgres` to join a cross-machine mesh (see below) | local SQLite |
 | `AGENT_RELAY_PG_HOST` / `_USER` / `_DB` | Shared Postgres connection settings (non-secret) | — |
 | `AGENT_RELAY_AZURE_TENANT` | Entra tenant id for the DB token (multi-tenant / MFA accounts) | `az` default context |
@@ -115,12 +116,21 @@ overrides for the defaults:
 | `AGENT_RELAY_DEBUG` | `1`/`true`/`yes`/`on` → log every periodic sweep (cross-machine); errors always shown | silent |
 | `AGENT_RELAY_ENV_FILE` | Explicit path to a `.env` to load | `extension/.env`, then repo-root `.env` |
 
-> All sessions that share an `AGENT_RELAY_DB` (or a single global install) form one mesh.
+> All local-mode sessions that use the same SQLite store — the same default data dir, or the same
+> explicit `AGENT_RELAY_DB` — form one mesh.
 
 > **`.env` support:** any of these may be set in a gitignored `.env` (auto-loaded from
 > `extension/.env`, the repo root, or `$AGENT_RELAY_ENV_FILE`) instead of being exported — handy for
 > the cross-machine settings below. Shell-exported values take precedence. Copy `.env.example` to
 > start.
+
+> **Data & logs:** the local SQLite store and a **rolling diagnostic log** live in a per-user data
+> directory — `%LOCALAPPDATA%\agent-relay\` (Windows), `~/Library/Application Support/agent-relay/`
+> (macOS), or `$XDG_DATA_HOME/agent-relay` (Linux; `~/.local/share/agent-relay` when unset) —
+> **outside** the install dir, so upgrades never
+> touch your state. Override with `AGENT_RELAY_DATA_DIR`. The log is `logs/agent-relay.log`, rotated
+> when it passes 24h old, keeping the current file plus 3 older ones. (An existing in-install
+> `agent-relay.db` from an older version is migrated into the data dir automatically on first run.)
 
 ## Cross-machine messaging (Azure Postgres)
 
@@ -193,8 +203,12 @@ for you, stopping with a specific message if anything's wrong:
 5. **verifies a real connection** to the shared database end-to-end.
 
 If verification fails, the message tells you exactly what to fix — e.g. *wrong account/tenant* (“sign
-in as the DB admin”), *unreachable host*, or *not signed in* — then re-run. (The extension is still
-installed and runs in **local** mode until cross-machine is fixed.)
+in as the DB admin”), *unreachable host*, or *not signed in* — then re-run. Because you explicitly
+selected the cross-machine transport, a session that still can't connect **does not silently fall back
+to the local mesh** (that would split your machines onto separate, single-machine stores without
+telling you): it retries the connect a few times and then runs **inactive** — `send_message` /
+`list_relay_agents` report it's not started — until you fix connectivity **and restart**, or unset
+`AGENT_RELAY_TRANSPORT` and restart to use the local mesh.
 
 > **Multi-tenant / MFA:** if your `az` account belongs to more than one Entra tenant, or the
 > database's tenant enforces MFA, a plain `az login` can fail enumerating tenants (`AADSTS50076`,
@@ -234,13 +248,16 @@ mesh. `list_relay_agents`
 shows everyone, each tagged with its **device name** (the machine's hostname; override with
 `AGENT_RELAY_HOST`) so you can tell hosts apart — it's display-only, never used for addressing.
 
-### Resilience & fallback
+### Resilience
 
 If the database can't be reached **at startup** (offline, not yet `az login`'d, an unsupported
-newer schema, …) the session **falls back to the local SQLite mesh** for that run and logs why —
-it stays usable, just single-machine until the next start. A transient mid-session blip is ridden
-out by the poll loop (no fallback). A session-owned, advisory-lock-guarded sweep prunes old
-messages (> 24 h) and long-gone peers (> 7 d), so no always-on cleanup job is required.
+newer schema, …), the session **retries the connect a few times**; if it still can't connect it runs
+**inactive** for that session and does **not** silently fall back to the local single-machine mesh
+(that would split your machines onto separate stores without telling you). Fix connectivity and
+**restart**, or unset `AGENT_RELAY_TRANSPORT` and restart to use the local mesh. A transient
+mid-session blip is ridden out by the poll loop (the session stays up, no fallback). A session-owned,
+advisory-lock-guarded sweep prunes old messages (> 24 h) and long-gone peers (> 7 d), so no always-on
+cleanup job is required.
 
 ### Security model
 
