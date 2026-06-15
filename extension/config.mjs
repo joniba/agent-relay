@@ -45,7 +45,7 @@ export function createConfig({ log = () => {} } = {}) {
   if (process.env.AGENT_RELAY_TRANSPORT === "postgres") {
     const credentials = process.env.AGENT_RELAY_PG_PASSWORD
       ? createEnvPasswordCredentials()
-      : createAzureEntraCredentials();
+      : createAzureEntraCredentials({ tenantId: process.env.AGENT_RELAY_AZURE_TENANT });
     return {
       identity: createLocalAliasIdentity(),
       credentials,

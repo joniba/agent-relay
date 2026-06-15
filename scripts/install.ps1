@@ -103,7 +103,7 @@ if (Test-Path -LiteralPath $envFile) {
 # WINS over the file, matching the runtime (env-file.mjs fills gaps; exported
 # vars win), so the preflight validates/connects against exactly what a session
 # will use.
-foreach ($k in @('AGENT_RELAY_TRANSPORT', 'AGENT_RELAY_PG_HOST', 'AGENT_RELAY_PG_USER', 'AGENT_RELAY_PG_DB', 'AZURE_CONFIG_DIR')) {
+foreach ($k in @('AGENT_RELAY_TRANSPORT', 'AGENT_RELAY_PG_HOST', 'AGENT_RELAY_PG_USER', 'AGENT_RELAY_PG_DB', 'AZURE_CONFIG_DIR', 'AGENT_RELAY_AZURE_TENANT')) {
     $val = [Environment]::GetEnvironmentVariable($k)
     if ($val) { $envMap[$k] = $val }
 }
@@ -131,17 +131,23 @@ if ($isCrossMachine) {
 
     # 4. Azure sign-in. Honor the .env's AZURE_CONFIG_DIR so the token comes from
     #    the same profile a real session uses; auto-launch `az login` if needed.
+    #    If AGENT_RELAY_AZURE_TENANT is set, target that tenant directly — required
+    #    when the account spans multiple tenants or the DB tenant enforces MFA (a
+    #    plain `az login` otherwise fails enumerating other tenants, e.g. AADSTS50076).
     if ($envMap['AZURE_CONFIG_DIR']) { $env:AZURE_CONFIG_DIR = $envMap['AZURE_CONFIG_DIR'] }
-    & az account get-access-token --scope $PG_SCOPE --output none 2>$null
+    $tenant = $envMap['AGENT_RELAY_AZURE_TENANT']
+    $tenantArgs = if ($tenant) { @('--tenant', $tenant) } else { @() }
+    & az account get-access-token @tenantArgs --scope $PG_SCOPE --output none 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Not signed in to Azure — launching 'az login' (sign in as the DB admin: $($envMap['AGENT_RELAY_PG_USER']))..." -ForegroundColor Yellow
-        & az login --output none
+        & az login @tenantArgs --output none
         if ($LASTEXITCODE -ne 0) {
-            throw "az login failed. On a headless machine try:  az login --use-device-code  (sign in as $($envMap['AGENT_RELAY_PG_USER']))."
+            $hint = if ($tenant) { "" } else { " If your account spans multiple tenants or the database tenant requires MFA, set AGENT_RELAY_AZURE_TENANT=<tenant-id> in your .env (or run: az login --tenant <tenant-id>)." }
+            throw "az login failed (sign in as $($envMap['AGENT_RELAY_PG_USER'])).$hint On a headless machine add --use-device-code."
         }
-        & az account get-access-token --scope $PG_SCOPE --output none 2>$null
+        & az account get-access-token @tenantArgs --scope $PG_SCOPE --output none 2>$null
         if ($LASTEXITCODE -ne 0) {
-            throw "Still can't mint a Postgres token after login. Ensure you signed in as the DB admin and (if set) that AZURE_CONFIG_DIR is correct."
+            throw "Still can't mint a Postgres token after login. Check you signed in as the DB admin, the tenant (AGENT_RELAY_AZURE_TENANT), and (if set) AZURE_CONFIG_DIR."
         }
     }
     Write-Host "Azure sign-in OK." -ForegroundColor Green

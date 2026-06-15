@@ -110,6 +110,7 @@ overrides for the defaults:
 | `AGENT_RELAY_DB`   | Path to the shared SQLite store | `agent-relay.db` beside the extension |
 | `AGENT_RELAY_TRANSPORT` | `postgres` to join a cross-machine mesh (see below) | local SQLite |
 | `AGENT_RELAY_PG_HOST` / `_USER` / `_DB` | Shared Postgres connection settings (non-secret) | — |
+| `AGENT_RELAY_AZURE_TENANT` | Entra tenant id for the DB token (multi-tenant / MFA accounts) | `az` default context |
 | `AGENT_RELAY_HOST` | Device name shown beside each peer in the roster | the machine's hostname |
 | `AGENT_RELAY_ENV_FILE` | Explicit path to a `.env` to load | `extension/.env`, then repo-root `.env` |
 
@@ -168,6 +169,7 @@ AGENT_RELAY_TRANSPORT=postgres
 AGENT_RELAY_PG_HOST=pg-agent-relay-<unique>.postgres.database.azure.com
 AGENT_RELAY_PG_USER="<your-entra-admin-upn>"
 AGENT_RELAY_PG_DB=agentrelay
+# AGENT_RELAY_AZURE_TENANT=<tenant-id>       # set if your account spans multiple tenants or the DB tenant needs MFA
 # AZURE_CONFIG_DIR=C:\path\to\.azure-relay   # optional: isolate the az profile used for the token
 ```
 
@@ -184,13 +186,20 @@ for you, stopping with a specific message if anything's wrong:
 2. validates the `.env` has `AGENT_RELAY_PG_HOST` / `_USER` / `_DB`,
 3. runs **`npm install`** (fetches `pg` + `@azure/identity`) and bundles them into the install,
 4. **signs you in** — if you're not authenticated it launches **`az login`** (sign in as the DB
-   admin). If plain `az login` fails on a headless machine, run `az login --use-device-code` yourself
-   and re-run,
+   admin, targeting `AGENT_RELAY_AZURE_TENANT` if set). If it fails on a headless machine, run it
+   yourself with `--use-device-code` (and `--tenant <id>` if `AGENT_RELAY_AZURE_TENANT` is set), then
+   re-run,
 5. **verifies a real connection** to the shared database end-to-end.
 
-If verification fails, the message tells you exactly what to fix — e.g. *wrong account* (“sign in as
-the DB admin”), *unreachable host*, or *not signed in* — then re-run. (The extension is still
+If verification fails, the message tells you exactly what to fix — e.g. *wrong account/tenant* (“sign
+in as the DB admin”), *unreachable host*, or *not signed in* — then re-run. (The extension is still
 installed and runs in **local** mode until cross-machine is fixed.)
+
+> **Multi-tenant / MFA:** if your `az` account belongs to more than one Entra tenant, or the
+> database's tenant enforces MFA, a plain `az login` can fail enumerating tenants (`AADSTS50076`,
+> “no subscriptions found”). Set **`AGENT_RELAY_AZURE_TENANT`** to the database's tenant id — the
+> installer then signs in and acquires the token against that tenant directly. (Find the id with
+> `az account show --query tenantId -o tsv` while signed into that tenant, or from the Azure portal.)
 
 > Each machine mints its **own** short-lived Entra token locally via its own `az login` — **tokens
 > are never copied between machines**. The four `.env` values are not secrets (a hostname, a
