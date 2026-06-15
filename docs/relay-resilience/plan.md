@@ -74,25 +74,30 @@ sqlite without touching the pg path. Independently shippable.
       first-line-timestamp approach) · SOLID (clean)
 - [x] Committed
 
-## Phase 3 — Boot retry x3 + no-silent-fallback
+## Phase 3 — Boot retry x3 + no-silent-fallback  ✅ DONE
 
 **Goal:** explicit Postgres never silently degrades; slow/transient networks get
 retried. The behavioral core.
 
-- [ ] `bootstrap.mjs`: retry transport init up to 3x — 30s/attempt, backoff 2s->4s; warn
-      on 1 & 2, error on 3 (to the tee'd log).
-- [ ] No-fallback policy: the composition root supplies **no** fallback when
-      `AGENT_RELAY_TRANSPORT=postgres`; on exhaustion the relay goes **INACTIVE** (no
-      mesh) with a non-blocking suggestion to switch to local. Default-local path keeps
-      its current behavior. Guard the startup banner + tool handlers
-      (`send_message`/`list_relay_agents`) for the inactive state.
-- [ ] `postgres.mjs`: add pool `connectionTimeoutMillis` (bounds each attempt) — the ONLY
-      transport change (keeps clove's rebase mechanical).
-- [ ] Smoke: fake transport failing N->OK (assert 3 attempts + backoff via fake timers +
-      warn/warn/error); explicit-postgres exhaustion -> inactive (not local); default-local
-      unaffected; tools error gracefully when inactive.
-- [ ] Gate: code-review · SOLID
-- [ ] Committed
+- [x] `bootstrap.mjs`: rewritten — `startRelaySession` treats `createConfig` as a FACTORY
+      and retries the connect (init→register) up to 3x via `bringUpWithRetry`, each attempt
+      bounded by a 30s `withTimeout`, backoff 2s→4s (injected `sleep`), warn on 1 & 2, error
+      on 3, then the error PROPAGATES (no fallback). CRITICAL FIX (both gates): each attempt
+      uses a FRESH transport — the seam is init-once/stop-terminal, so a stopped transport is
+      never reused (reuse would "succeed" into an inert transport).
+- [x] No-fallback policy: `extension.mjs` supplies the retry policy ONLY for explicit
+      `AGENT_RELAY_TRANSPORT=postgres`; on exhaustion the relay goes INACTIVE (bootError →
+      tools return notReadyResult) with a non-blocking "unset AGENT_RELAY_TRANSPORT to use
+      local" suggestion. Default-local = single attempt, unchanged. `createFallbackConfig`
+      removed.
+- [x] `postgres.mjs`: added pool `connectionTimeoutMillis` (default 30000) — the ONLY
+      functional transport change (+ 2 stale-comment fixes); keeps clove's rebase mechanical.
+- [x] Smoke: 8 bootstrap tests incl. a FAITHFUL fake that models terminal-`stop` (so the
+      seam bug is now caught), fresh-instance-per-retry, give-up, single-attempt, timeout,
+      and a real message delivered through the post-retry transport. Suite: 126 tests, 0 fail.
+- [x] Gate: code-review (Critical seam-reuse bug found + fixed → "ready to merge") · SOLID
+      (clean; timeout-cancellation residual accepted via fresh-instance containment)
+- [x] Committed
 
 ## Phase 4 — Docs + installer
 

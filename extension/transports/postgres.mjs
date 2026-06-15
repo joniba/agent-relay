@@ -32,6 +32,8 @@
  * @param {string} opts.user
  * @param {string} opts.database
  * @param {number} [opts.port]                 Default 5432.
+ * @param {number} [opts.connectionTimeoutMillis] Per-connection acquire timeout so a
+ *   blocked/slow connect fails fast instead of hanging boot (default 30000).
  * @param {boolean|object} [opts.ssl]          `pg` ssl option. Default
  *   `{ rejectUnauthorized: true }`; pass `false` for a local Docker server.
  * @param {number} [opts.pollIntervalMs]       Poll cadence (default 3000).
@@ -56,6 +58,7 @@ export function createPostgresTransport({
   user,
   database,
   port = 5432,
+  connectionTimeoutMillis = 30000,
   ssl = { rejectUnauthorized: true },
   pollIntervalMs = 3000,
   heartbeatIntervalMs = 9000,
@@ -219,7 +222,7 @@ export function createPostgresTransport({
       self = ctx.self;
       // Load `pg` on demand. If it isn't installed, this is the cross-machine
       // opt-in path without its dependency — surface a clear, actionable error
-      // (the entry then falls back to the local SQLite transport).
+      // (the entry then surfaces the failure and the relay goes inactive).
       if (!pg) {
         try {
           pg = (await import("pg")).default;
@@ -242,6 +245,7 @@ export function createPostgresTransport({
         max: 4,
         maxLifetimeSeconds: 2700, // recycle connections before a token would expire
         idleTimeoutMillis: 30000,
+        connectionTimeoutMillis,
       });
       // An idle-client error must never crash the host process.
       pool.on("error", (err) => log(`pg pool error: ${err.message}`));
@@ -250,7 +254,7 @@ export function createPostgresTransport({
       } catch (err) {
         // init failed (unreachable host, bad creds, refuse-newer schema, …) —
         // release the pool so a leaked idle client can't keep the process alive,
-        // then rethrow so the entry can fall back.
+        // then rethrow so the caller can retry (on a fresh instance) or surface it.
         try {
           await pool.end();
         } catch {

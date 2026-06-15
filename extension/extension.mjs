@@ -1,16 +1,17 @@
 // agent-relay — Copilot CLI extension entry.
 //
-// Thin wiring layer ONLY: it joins the foreground session, resolves the seams
-// from the composition root (config.mjs), constructs the core relay, and manages
-// lifecycle. All behavior lives in core/ + the chosen adapters; this file makes
-// no policy decisions of its own.
+// Composition root + lifecycle: it joins the foreground session, resolves the seams
+// from config.mjs, chooses boot policy (connect-retry + inactive-on-failure for an
+// explicit cross-machine transport), constructs the core relay, and manages
+// lifecycle. All BEHAVIOR lives in core/ + the chosen adapters; the only decisions
+// here are which adapters and which boot policy to wire — the composition root's job.
 //
 // Requires `copilot --experimental` (extensions are gated behind it) and Node 22+.
 
 import { joinSession } from "@github/copilot-sdk/extension";
 import { join } from "node:path";
 import { loadEnvFile } from "./env-file.mjs";
-import { createConfig, createFallbackConfig } from "./config.mjs";
+import { createConfig } from "./config.mjs";
 import { startRelaySession } from "./bootstrap.mjs";
 import { formatRoster } from "./roster.mjs";
 import { resolveDataDir } from "./storage/paths.mjs";
@@ -164,19 +165,24 @@ if (loadedEnvFile) {
   );
 }
 
-// Fall back to the local SQLite transport ONLY when the primary is the remote
-// (cross-machine) substrate — falling local→local would just retry the same
-// failing store and makes the "cross-machine unavailable" log accurate.
-const fallbackFactory =
-  process.env.AGENT_RELAY_TRANSPORT === "postgres" ? createFallbackConfig : undefined;
+// When the user EXPLICITLY selected the cross-machine (Postgres) transport, a boot
+// failure must SURFACE — the relay goes inactive — rather than silently dropping to
+// a different, single-machine local mesh (which caused confusing "why can't my
+// machines see each other" situations). Retry transient/slow connects a few times
+// first; the local default gets a single attempt, since a local store failure won't
+// heal by retrying.
+const isCrossMachine = process.env.AGENT_RELAY_TRANSPORT === "postgres";
+const retry = isCrossMachine
+  ? { attempts: 3, attemptTimeoutMs: 30_000, backoffsMs: [2_000, 4_000] }
+  : undefined;
 
 try {
-  // All substrate/fallback composition lives in config.mjs; the entry only
-  // supplies the session + log and performs the boot via the testable bootstrap.
+  // All substrate composition lives in config.mjs; the entry only supplies the
+  // session + log + retry policy and performs the boot via the testable bootstrap.
   const started = await startRelaySession({
     session,
     createConfig: () => createConfig({ log: relayLog }),
-    fallbackFactory,
+    retry,
     log: relayLog,
   });
   relay = started.relay;
@@ -191,7 +197,10 @@ try {
   }
 } catch (err) {
   bootError = err.message;
-  relayLog(`agent-relay failed to start: ${err.message}`, { level: "error" });
+  const suggestion = isCrossMachine
+    ? " — agent-relay is INACTIVE this session (not on any mesh). Fix connectivity and restart, or unset AGENT_RELAY_TRANSPORT to use the local single-machine mesh."
+    : "";
+  relayLog(`agent-relay failed to start: ${err.message}${suggestion}`, { level: "error" });
 }
 
 // Best-effort cleanup if the host tears us down without onSessionEnd. Use `once`

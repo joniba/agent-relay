@@ -76,19 +76,13 @@ export function createConfig({ log = () => {} } = {}) {
 
 /**
  * The local SQLite slice (transport + its no-op credentials) — the zero-infra
- * default, and the boot-time FALLBACK target when the cross-machine transport
- * can't come up (see bootstrap.mjs). Kept here so all composition lives at the
- * root; the entry just calls it.
+ * default. Kept here so all composition lives at the root; createConfig calls it.
  *
  * @returns {{
  *   transport: import('./seams/transport.mjs').Transport,
  *   credentials: import('./seams/credentials.mjs').CredentialProvider,
  * }}
  */
-export function createFallbackConfig() {
-  return localSlice();
-}
-
 function localSlice() {
   const explicitDb = process.env.AGENT_RELAY_DB;
   if (explicitDb) {
