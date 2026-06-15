@@ -1,4 +1,8 @@
-import pg from "pg";
+// `pg` is loaded LAZILY inside init() (see below), NOT at module top — so the
+// extension's default single-machine path (built-in node:sqlite) needs ZERO
+// external packages installed. The `pg` dependency matters only when a session
+// actually opts into the cross-machine Postgres transport. Mirrors how the Azure
+// credential lazily imports @azure/identity.
 
 /**
  * Cross-machine Transport: a shared PostgreSQL store + interval poll. The
@@ -73,8 +77,10 @@ export function createPostgresTransport({
   const messageTtlSecs = messageTtlMs / 1000;
   const agentRetentionSecs = agentRetentionMs / 1000;
 
-  /** @type {pg.Pool} */
+  /** @type {import('pg').Pool} */
   let pool;
+  /** Lazily-imported `pg` module namespace (loaded once in init). */
+  let pg;
   /** @type {import('../seams/identity.mjs').AgentIdentity} */
   let self;
   /** @type {ReturnType<typeof setInterval> | null} */
@@ -205,6 +211,19 @@ export function createPostgresTransport({
   return {
     async init(ctx) {
       self = ctx.self;
+      // Load `pg` on demand. If it isn't installed, this is the cross-machine
+      // opt-in path without its dependency — surface a clear, actionable error
+      // (the entry then falls back to the local SQLite transport).
+      if (!pg) {
+        try {
+          pg = (await import("pg")).default;
+        } catch (err) {
+          throw new Error(
+            "the 'postgres' transport requires the 'pg' package — run `npm install` " +
+              `in the agent-relay folder (original: ${err.message})`,
+          );
+        }
+      }
       pool = new pg.Pool({
         host,
         user,
@@ -421,7 +440,7 @@ export const TARGET_SCHEMA = 1;
  * Creates the schema on a fresh DB, upgrades an older one, and REFUSES to operate
  * on a newer schema than this build supports (the entry then falls back).
  *
- * @param {pg.Pool} pool
+ * @param {import('pg').Pool} pool
  * @param {(msg: string) => void} log
  */
 export async function migrate(pool, log = () => {}) {

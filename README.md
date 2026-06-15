@@ -15,31 +15,37 @@ A tiny core plus five pluggable seams (**Transport**, **Identity**, **Credential
 
 ## Install
 
-Clone the repo, **install its dependencies**, then run the install script — it links (or copies)
-`extension/` into `~/.copilot/extensions/agent-relay/` and verifies the entry. It does **not**
-launch Copilot.
+Clone the repo and run the install script — it **copies** `extension/` (and its `node_modules`, if
+present) into `~/.copilot/extensions/agent-relay/` and verifies the entry. It does **not** launch
+Copilot.
 
-> The entry imports `pg` (and lazily `@azure/identity` for the cross-machine path), so
-> `npm install` is required even for the single-machine default. The **junction** install (below)
-> resolves these from the clone's `node_modules`; with `-Copy`/`--copy` you must also make the
-> dependencies resolvable at the destination (e.g. copy `node_modules` too, or prefer the junction).
+> **Dependencies are opt-in.** The single-machine default uses Node's built-in SQLite and needs
+> **no packages** — just clone and install. Only the **cross-machine** transport needs `pg` plus the
+> Azure credential lib (`@azure/identity`), both loaded lazily — so run `npm install` *before*
+> installing **only if** you want cross-machine messaging; the script then bundles `node_modules`
+> into the install.
 
 ```powershell
 # Windows / PowerShell
 git clone https://github.com/joniba/agent-relay.git
-cd agent-relay; npm install                    # runtime deps: pg, @azure/identity
-pwsh scripts/install.ps1                        # junction (a later `git pull` updates it live)
-#   ...-Copy   to copy instead of link
-#   ...-Force  to replace an existing install
+cd agent-relay
+# npm install        # ONLY for cross-machine (fetches pg + Azure cred deps) — skip for local-only
+pwsh scripts/install.ps1                        # self-contained copy into ~/.copilot/extensions
+#   ...-Link   dev junction to this clone instead (updates via `git pull`)
 ```
 
 ```bash
 # macOS / Linux
 git clone https://github.com/joniba/agent-relay.git
-cd agent-relay && npm install                  # runtime deps: pg, @azure/identity
-scripts/install.sh                             # symlink (a later `git pull` updates it live)
-#   --copy / --force  as above
+cd agent-relay
+# npm install        # ONLY for cross-machine (fetches pg + Azure cred deps) — skip for local-only
+scripts/install.sh                             # self-contained copy into ~/.copilot/extensions
+#   --link   dev symlink to this clone instead (updates via `git pull`)
 ```
+
+**Upgrading:** `git pull` then re-run the install script. The copy refreshes the code in place and
+**preserves your runtime DB** (`*.db*` is never touched), so you can upgrade **while sessions are
+running** — no need to close anything.
 
 <details>
 <summary>Manual install (no script)</summary>
@@ -50,11 +56,9 @@ Copy the extension so the entry lives at `~/.copilot/extensions/agent-relay/exte
 $dest = "$env:USERPROFILE\.copilot\extensions\agent-relay"
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Copy-Item -Recurse -Force .\extension\* $dest
+# Cross-machine only: also copy node_modules so `pg` resolves at the destination
+# Copy-Item -Recurse -Force .\node_modules $dest\node_modules
 ```
-
-Run `npm install` in the clone first, and note the same dependency caveat as `-Copy`: a plain copy
-won't resolve `pg`/`@azure/identity` unless they're reachable from `$dest` — prefer linking the
-extension from the clone (the install script's default junction/symlink) after `npm install`.
 </details>
 
 Then start Copilot with extensions enabled:
@@ -150,18 +154,25 @@ prints a password — there isn't one.
 > exact figures). Tear it down when you're done (see below). **Region:** defaults to
 > `israelcentral`; override with `-Location`.
 
-### 2. Distribute the (non-secret) config to each machine
+### 2. Enable cross-machine on each machine
 
-Every machine/session that should join the **same** mesh provides the **same** four values. The
-tidiest way is a **gitignored `.env` file** in the project (so you don't re-export them in every
-shell); copy the template and fill it in:
+On every machine that should join the **same** mesh:
+
+**a. Install the dependency.** Cross-machine needs `pg`, so in the clone run `npm install`, then
+**(re-)run the install script** so `node_modules` is bundled into the installed extension:
 
 ```powershell
-cp .env.example extension/.env        # gitignored; auto-loaded at startup
+cd agent-relay; npm install; pwsh scripts/install.ps1     # bash: npm install && scripts/install.sh
 ```
 
+**b. Provide the same four (non-secret) values** via a **gitignored `.env`**. The extension reads
+`.env` from the **installed** directory, so put it where the install will see it — either create
+`extension/.env` in the clone **before (re-)running install** (it's copied in), drop it straight
+into `~/.copilot/extensions/agent-relay/.env`, or point `$AGENT_RELAY_ENV_FILE` at it. Start from
+`.env.example`:
+
 ```ini
-# extension/.env  — quote any value containing '#' (e.g. the Entra guest UPN)
+# .env  — quote any value containing '#' (e.g. the Entra guest UPN)
 AGENT_RELAY_TRANSPORT=postgres
 AGENT_RELAY_PG_HOST=pg-agent-relay-<unique>.postgres.database.azure.com
 AGENT_RELAY_PG_USER="<your-entra-admin-upn>"
@@ -169,8 +180,7 @@ AGENT_RELAY_PG_DB=agentrelay
 # AZURE_CONFIG_DIR=C:\path\to\.azure-relay   # mint the token as the DB admin
 ```
 
-It's loaded automatically from `extension/.env` (or the repo root, or `$AGENT_RELAY_ENV_FILE`).
-Anything you **also** export in the shell takes precedence, so you can still override ad-hoc.
+Shell-exported values take precedence over the file, so you can still override ad-hoc.
 
 <details><summary>Prefer plain shell exports instead?</summary>
 

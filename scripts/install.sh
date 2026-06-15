@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # Install agent-relay as a Copilot CLI extension (macOS / Linux).
 #
-# Symlinks (or copies) this clone's `extension/` folder into the Copilot CLI
-# extensions directory so the entry lives at
+# Copies this clone's `extension/` folder (plus its `node_modules`, if present)
+# into the Copilot CLI extensions directory so the entry lives at
 # `~/.copilot/extensions/agent-relay/extension.mjs`. Does NOT launch Copilot.
 #
+# The default is a self-contained COPY (lock-safe upgrades — preserves *.db*).
+# Use --link for a symlink to this clone (dev: `git pull` updates it live).
+#
 # Usage:
-#   scripts/install.sh           # symlink (a later `git pull` updates the live extension)
-#   scripts/install.sh --copy    # copy the files instead of symlinking
-#   scripts/install.sh --force    # replace an existing install at the destination
+#   scripts/install.sh           # self-contained copy (recommended)
+#   scripts/install.sh --link    # dev symlink to this clone
 set -euo pipefail
 
-COPY=0
-FORCE=0
+LINK=0
 NO_STATUSLINE=0
 for arg in "$@"; do
   case "$arg" in
-    --copy)  COPY=1 ;;
-    --force) FORCE=1 ;;
+    --link)  LINK=1 ;;
     --no-statusline) NO_STATUSLINE=1 ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' ; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
@@ -50,45 +50,47 @@ ext_root="$copilot_home/extensions"
 dest="$ext_root/agent-relay"
 mkdir -p "$ext_root"
 
-# --- Handle an existing destination (idempotent / safe) ---------------------
-# When already linked to this clone we keep the link but still fall through to
-# the statusline wiring below, so a refresh (git pull + re-run) stays idempotent.
-skip_install=0
-if [ -e "$dest" ] || [ -L "$dest" ]; then
-  if [ "$COPY" -eq 0 ] && [ -L "$dest" ] && [ "$(readlink "$dest")" = "$source_dir" ]; then
-    echo "Already installed: $dest -> $source_dir (symlink)."
-    mode="symlink"
-    skip_install=1
-  elif [ "$FORCE" -eq 0 ]; then
-    echo "Destination '$dest' already exists. Re-run with --force to replace it." >&2
-    exit 1
-  else
-    echo "WARNING: replacing existing '$dest' (--force)." >&2
-    # A symlink is removed as a link only; a real directory is removed recursively.
-    if [ -L "$dest" ]; then rm "$dest"; else rm -rf "$dest"; fi
-  fi
-fi
+# --- Install: self-contained COPY (default) or a dev SYMLINK (--link) --------
+# A copy bundles extension/ + node_modules so the destination is self-contained
+# and never depends on this clone staying put. Re-running to upgrade refreshes
+# the code in place and PRESERVES runtime state (*.db*) — never even opened — so
+# it's safe while a session holds the SQLite DB open. --link instead points the
+# destination at this clone (contributors: `git pull` updates it live).
+deps_dir="$repo_root/node_modules"
 
-# --- Install: symlink (default) or copy -------------------------------------
-if [ "$skip_install" -eq 0 ]; then
-  if [ "$COPY" -eq 1 ]; then
-    mkdir -p "$dest"
-    cp -R "$source_dir"/. "$dest"/
-    mode="copied"
+if [ "$LINK" -eq 1 ]; then
+  # Dev symlink. Needs a removable destination; a copy whose DB is held open by a
+  # running session can't be removed — close those sessions, or use a copy.
+  if [ -L "$dest" ]; then rm "$dest"; elif [ -e "$dest" ]; then rm -rf "$dest"; fi
+  ln -s "$source_dir" "$dest"
+  mode="symlink"
+else
+  # Self-contained copy, lock-safe: remove existing CODE (everything EXCEPT
+  # *.db*), then copy extension/ + node_modules. The locked DB is left in place.
+  if [ -L "$dest" ]; then
+    rm "$dest"; mkdir -p "$dest"
+  elif [ -d "$dest" ]; then
+    find "$dest" -mindepth 1 -maxdepth 1 ! -name '*.db*' -exec rm -rf {} +
   else
-    ln -s "$source_dir" "$dest"
-    mode="symlink"
+    mkdir -p "$dest"
+  fi
+  cp -R "$source_dir"/. "$dest"/
+  # Bundle dependencies if present. Cross-machine users ran `npm install`; the
+  # single-machine default needs none, so a missing node_modules is fine.
+  if [ -d "$deps_dir" ]; then
+    cp -R "$deps_dir" "$dest/node_modules"
+    mode="copied (+ node_modules)"
+  else
+    mode="copied (no node_modules — single-machine default only)"
   fi
 fi
 
 # --- Verify -----------------------------------------------------------------
 [ -f "$dest/extension.mjs" ] || { echo "Install verification failed: '$dest/extension.mjs' is missing." >&2; exit 1; }
 
-if [ "$skip_install" -eq 0 ]; then
-  echo
-  echo "✓ Installed agent-relay -> $dest ($mode)"
-  [ "$mode" = "symlink" ] && echo "  Source: $source_dir  (a later \`git pull\` updates the live extension)"
-fi
+echo
+echo "✓ Installed agent-relay -> $dest ($mode)"
+[ "$mode" = "symlink" ] && echo "  Source: $source_dir  (a later \`git pull\` updates the live extension)"
 
 # --- Statusline: point Copilot's single statusLine slot at agent-relay --------
 # agent-relay shows THIS session's locally-generated alias below the prompt.

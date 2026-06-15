@@ -4,31 +4,35 @@
   Install agent-relay as a Copilot CLI extension (Windows / PowerShell).
 
 .DESCRIPTION
-  Links (or copies) this clone's `extension/` folder into the Copilot CLI
-  extensions directory so the entry lives at
+  Copies this clone's `extension/` folder (plus its `node_modules`, if present)
+  into the Copilot CLI extensions directory so the entry lives at
   `~/.copilot/extensions/agent-relay/extension.mjs`. Does NOT launch Copilot.
 
-  By default a directory **junction** is created (no admin needed, and a later
-  `git pull` updates the live extension with no re-copy). Use -Copy for a plain
-  copy instead.
+  The default is a self-contained COPY: the destination depends on nothing else,
+  and re-running to upgrade is LOCK-SAFE — it refreshes the code in place and
+  PRESERVES runtime state (`*.db*`), so you can upgrade while sessions are open.
+  The single-machine default needs no packages (built-in node:sqlite); for
+  cross-machine messaging run `npm install` first so `node_modules` (with `pg`)
+  is bundled into the install.
 
-.PARAMETER Copy
-  Copy the files instead of creating a junction (use when you can't/won't link).
+  Use -Link to create a directory **junction** to this clone instead (for
+  contributors: a later `git pull` updates the live extension with no re-copy).
 
-.PARAMETER Force
-  Replace an existing install at the destination. Without this, an existing
-  destination that isn't already our link is left untouched and the script exits
-  non-zero. NOTE: with -Copy this removes any DB/state in a previously-copied dir.
+.PARAMETER Link
+  Create a junction to this clone instead of copying (dev convenience); updates
+  then come from `git pull`. Requires the destination be removable — a copy whose
+  SQLite DB is held open by a running session can't be replaced with a link.
+
+.PARAMETER NoStatusline
+  Skip pointing Copilot's statusline at agent-relay.
 
 .EXAMPLE
-  pwsh scripts/install.ps1
-  pwsh scripts/install.ps1 -Copy
-  pwsh scripts/install.ps1 -Force
+  pwsh scripts/install.ps1            # self-contained copy (recommended)
+  pwsh scripts/install.ps1 -Link     # dev junction to this clone
 #>
 [CmdletBinding()]
 param(
-    [switch]$Copy,
-    [switch]$Force,
+    [switch]$Link,
     [switch]$NoStatusline
 )
 
@@ -61,55 +65,62 @@ $extRoot     = Join-Path $copilotHome 'extensions'
 $dest        = Join-Path $extRoot 'agent-relay'
 New-Item -ItemType Directory -Force -Path $extRoot | Out-Null
 
-# --- Handle an existing destination (idempotent / safe) ---------------------
-# When already linked to this clone we keep the link but still fall through to
-# the statusline wiring below, so a refresh (git pull + re-run) stays idempotent.
-$skipInstall = $false
-if (Test-Path -LiteralPath $dest) {
-    $item     = Get-Item -LiteralPath $dest -Force
-    $linkType = $item.LinkType
-    $target   = if ($linkType) { @($item.Target)[0] } else { $null }
-    $sameLink = $false
-    if ($target) {
-        try { $sameLink = (Resolve-Path -LiteralPath $target).Path -eq (Resolve-Path -LiteralPath $source).Path } catch {}
-    }
+# --- Install: self-contained COPY (default) or a dev JUNCTION (-Link) --------
+# A copy bundles extension/ + node_modules so the destination is self-contained
+# and never depends on this clone staying put. Re-running to upgrade refreshes
+# the code in place and PRESERVES runtime state (*.db*) — which is never even
+# opened — so an upgrade is safe while a session holds the SQLite DB open. -Link
+# instead points the destination at this clone (contributors: `git pull` updates
+# the live extension with no re-copy).
 
-    if (-not $Copy -and $sameLink) {
-        Write-Host "Already installed: $dest -> $source ($linkType)." -ForegroundColor Green
-        $mode = "$linkType".ToLower()
-        $skipInstall = $true
+$dbGlob = '*.db*'   # agent-relay.db + its -wal/-shm sidecars: runtime state, keep
+
+if ($Link) {
+    # Dev junction. Needs a removable destination; a copy whose DB is held open by
+    # a running session can't be removed — close those sessions, or use a copy.
+    if (Test-Path -LiteralPath $dest) {
+        $item = Get-Item -LiteralPath $dest -Force
+        if ($item.LinkType) { $item.Delete() }
+        else {
+            try { Remove-Item -LiteralPath $dest -Recurse -Force }
+            catch {
+                throw "Can't replace '$dest' with a link: $($_.Exception.Message). " +
+                      "If a running session holds agent-relay.db open, close it (or install without -Link)."
+            }
+        }
     }
-    elseif (-not $Force) {
-        $kind = if ($linkType) { "a $linkType to $target" } else { "a directory" }
-        Write-Error "Destination '$dest' already exists ($kind). Re-run with -Force to replace it."
-        exit 1
+    New-Item -ItemType Junction -Path $dest -Target $source | Out-Null
+    $mode = 'junction'
+}
+else {
+    # Self-contained copy, lock-safe. Refresh code in place: remove the existing
+    # CODE (everything EXCEPT *.db*), then copy extension/ + node_modules. The
+    # locked DB is excluded from the removal, so this works while a session runs.
+    if (Test-Path -LiteralPath $dest) {
+        $existing = Get-Item -LiteralPath $dest -Force
+        if ($existing.LinkType) {
+            $existing.Delete()
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        }
+        else {
+            Get-ChildItem -LiteralPath $dest -Force |
+                Where-Object { $_.Name -notlike $dbGlob } |
+                Remove-Item -Recurse -Force
+        }
     }
     else {
-        # -Force: remove the existing destination. A reparse point (junction/symlink)
-        # is deleted as a link only (never recursing into its target); a real
-        # directory is removed recursively.
-        Write-Warning "Replacing existing '$dest' (-Force)."
-        if ($linkType) { $item.Delete() }
-        else { Remove-Item -LiteralPath $dest -Recurse -Force }
-    }
-}
-
-# --- Install: junction (default) or copy ------------------------------------
-if (-not $skipInstall) {
-    if ($Copy) {
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
-        Copy-Item -Recurse -Force (Join-Path $source '*') $dest
-        $mode = 'copied'
-    } else {
-        try {
-            New-Item -ItemType Junction -Path $dest -Target $source | Out-Null
-            $mode = 'junction'
-        } catch {
-            Write-Warning "Junction failed ($($_.Exception.Message)). Falling back to copy."
-            New-Item -ItemType Directory -Force -Path $dest | Out-Null
-            Copy-Item -Recurse -Force (Join-Path $source '*') $dest
-            $mode = 'copied'
-        }
+    }
+    Copy-Item -Recurse -Force (Join-Path $source '*') $dest
+    # Bundle dependencies if present. Cross-machine users ran `npm install`; the
+    # single-machine default needs none, so a missing node_modules is fine.
+    $deps = Join-Path $repoRoot 'node_modules'
+    if (Test-Path -LiteralPath $deps) {
+        Copy-Item -Recurse -Force $deps (Join-Path $dest 'node_modules')
+        $mode = 'copied (+ node_modules)'
+    }
+    else {
+        $mode = 'copied (no node_modules — single-machine default only)'
     }
 }
 
@@ -118,10 +129,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $dest 'extension.mjs'))) {
     throw "Install verification failed: '$dest\extension.mjs' is missing."
 }
 
-if (-not $skipInstall) {
-    Write-Host "`n✓ Installed agent-relay -> $dest ($mode)" -ForegroundColor Green
-    if ($mode -eq 'junction') { Write-Host "  Source: $source  (a later ``git pull`` updates the live extension)" }
-}
+Write-Host "`n✓ Installed agent-relay -> $dest ($mode)" -ForegroundColor Green
+if ($mode -eq 'junction') { Write-Host "  Source: $source  (a later ``git pull`` updates the live extension)" }
 
 # --- Statusline: point Copilot's single statusLine slot at agent-relay --------
 # agent-relay shows THIS session's locally-generated alias below the prompt.
