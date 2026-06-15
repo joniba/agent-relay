@@ -163,3 +163,27 @@ task.
 
 **Plugs into:** `.github/workflows/` (new); repo settings (secret scanning, branch
 protection).
+
+---
+
+## Push-based delivery (PG LISTEN/NOTIFY) with poll as backup
+
+**Status:** ASSIGNED to the `clove` session (handed off 2026-06-15) · sequence: merge
+**LAST** (after `relay-resilience`) · **Value:** medium-high · **Effort:** medium
+
+**Problem.** Message delivery **polls** — the Postgres transport drains its inbox on a
+~3 s interval (`postgres.mjs` `startReceiving()`), so a delivered message can wait up to
+one poll interval before it wakes the recipient.
+
+**Approach.** Add Postgres **LISTEN/NOTIFY** for instant push delivery (NOTIFY on
+insert in `send`; a dedicated LISTEN connection wakes `drain` in `startReceiving`), and
+**keep the poll loop as a backup** safety-net (covers missed notifications, dropped
+LISTEN connections, reconnects). Stays behind the Transport seam; **core/relay.mjs
+untouched** (OCP).
+
+**Coordination.** Both this and `relay-resilience` edit `postgres.mjs` (`init` /
+`startReceiving`) — implement on **top of** the merged resilience work (rebase/branch
+off updated `main`) to avoid conflicts. Per the shared-machine protocol: separate
+worktree, announce installs/integration-tests/merges on the relay.
+
+**Plugs into:** `extension/transports/postgres.mjs` only.
