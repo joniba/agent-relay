@@ -56,20 +56,23 @@ sqlite without touching the pg path. Independently shippable.
       linkSync + try/finally) · SOLID (clean)
 - [x] Committed
 
-## Phase 2 — Rolling file log
+## Phase 2 — Rolling file log  ✅ DONE
 
 **Goal:** durable, self-rotating diagnostics for fast/confident debugging.
 
-- [ ] `extension/logging/rolling-file-log.mjs`: append to `<dataDir>/logs/`; rotate when
-      the current log is >=24h old; keep current + 3 rolled, delete the 4th on rollover;
-      injectable clock + fs; never throws (failure-isolated).
-- [ ] `extension.mjs`: tee `relayLog` -> session timeline AND rolling log. Capture:
-      registration, transport mode + fallback decision, connect attempts/retries/outcome,
-      sweeps (when debug), errors.
-- [ ] Smoke: rotation (forged timestamps), retention (4th deleted), tee, failure
-      isolation (a log-write error never disrupts the relay).
-- [ ] Gate: code-review · SOLID
-- [ ] Committed
+- [x] `extension/logging/rolling-file-log.mjs`: append ISO-timestamped lines to
+      `<dataDir>/logs/agent-relay.log`; rotate when the current log is >=24h old; keep
+      current + 3 rolled, delete the 4th on rollover; injectable clock + fs; never throws.
+      Period resumed across restarts from the log's own first-line timestamp (self-
+      describing; no fragile filesystem birthtime dependency).
+- [x] `extension.mjs`: tee `relayLog` -> session timeline AND rolling log; registration +
+      boot-error logs rerouted through `relayLog`. Logger built from
+      `join(resolveDataDir(), "logs")`, guarded so it can't break boot.
+- [x] Smoke: 7 rolling-log tests + a real-path probe that wrote the actual log file.
+      Suite: 125 tests, 0 fail.
+- [x] Gate: code-review (ship-able; Medium birthtime-starvation item resolved via the
+      first-line-timestamp approach) · SOLID (clean)
+- [x] Committed
 
 ## Phase 3 — Boot retry x3 + no-silent-fallback
 

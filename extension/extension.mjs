@@ -8,10 +8,13 @@
 // Requires `copilot --experimental` (extensions are gated behind it) and Node 22+.
 
 import { joinSession } from "@github/copilot-sdk/extension";
+import { join } from "node:path";
 import { loadEnvFile } from "./env-file.mjs";
 import { createConfig, createFallbackConfig } from "./config.mjs";
 import { startRelaySession } from "./bootstrap.mjs";
 import { formatRoster } from "./roster.mjs";
+import { resolveDataDir } from "./storage/paths.mjs";
+import { createRollingFileLog } from "./logging/rolling-file-log.mjs";
 
 // Load project-local config from a gitignored `.env` (if present) BEFORE anything
 // reads process.env — fills gaps only, so shell-exported vars still win. Lets the
@@ -129,16 +132,27 @@ async function shutdown() {
 
 const session = await joinSession({ tools, hooks });
 
-// Route the transport's diagnostics through the session log (observability).
-// Fire-and-forget, but never let a logging failure escape as an unhandled
-// rejection — these fire from background poll/sweep timers too, outside any
-// try/catch (mirrors the guarding around session.log/sink.log elsewhere).
+// A rolling on-disk log in the canonical data dir, so diagnostics survive after the
+// live session timeline scrolls away — and exist even when no session is watching.
+// Best-effort: created defensively, and the logger itself never throws.
+let fileLog = () => {};
+try {
+  fileLog = createRollingFileLog({ dir: join(resolveDataDir(), "logs") });
+} catch {
+  /* data dir unresolvable → degrade to timeline-only logging */
+}
+
+// Route the transport's diagnostics through BOTH the session log (live timeline) and
+// the rolling file log (durable). Fire-and-forget, but never let a logging failure
+// escape as an unhandled rejection — these fire from background poll/sweep timers
+// too, outside any try/catch.
 const relayLog = (msg, opts) => {
   try {
     Promise.resolve(session.log?.(msg, opts)).catch(() => {});
   } catch {
     /* a logging failure must never disrupt the relay */
   }
+  fileLog(msg);
 };
 
 // Surface which .env (if any) seeded the config — handy when diagnosing why a
@@ -169,7 +183,7 @@ try {
   self = started.self;
   transport = started.transport;
   ready = true;
-  await session.log?.(`agent-relay: registered as "${self.name}" — ready`);
+  relayLog(`agent-relay: registered as "${self.name}" — ready`);
   // If a teardown was requested while we were booting, honor it now.
   if (cleanedUp) {
     cleanedUp = false;
@@ -177,7 +191,7 @@ try {
   }
 } catch (err) {
   bootError = err.message;
-  await session.log?.(`agent-relay failed to start: ${err.message}`, { level: "error" });
+  relayLog(`agent-relay failed to start: ${err.message}`, { level: "error" });
 }
 
 // Best-effort cleanup if the host tears us down without onSessionEnd. Use `once`
