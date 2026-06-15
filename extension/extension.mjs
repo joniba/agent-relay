@@ -15,6 +15,7 @@ import { createConfig } from "./config.mjs";
 import { startRelaySession } from "./bootstrap.mjs";
 import { formatRoster } from "./roster.mjs";
 import { resolveDataDir } from "./storage/paths.mjs";
+import { aliasFor } from "./identity/local-alias.mjs";
 import { createRollingFileLog } from "./logging/rolling-file-log.mjs";
 
 // Load project-local config from a gitignored `.env` (if present) BEFORE anything
@@ -133,27 +134,49 @@ async function shutdown() {
 
 const session = await joinSession({ tools, hooks });
 
-// A rolling on-disk log in the canonical data dir, so diagnostics survive after the
-// live session timeline scrolls away — and exist even when no session is watching.
-// Best-effort: created defensively, and the logger itself never throws.
-let fileLog = () => {};
+// Per-session tag for the rolling log, so lines from concurrent sessions sharing the
+// file are correlatable. Two parts: (1) the friendly alias — computed with the SAME
+// precedence as the statusline's resolveName (AGENT_RELAY_NAME override, else the
+// deterministic aliasFor(sessionId)), so a log line matches the [alias] under the
+// prompt; this is deliberately the statusline preview, NOT the post-registration name
+// (which the registry may bump on a local collision) — keeping log↔statusline parity.
+// (2) the first 8 chars of the session id — the AUTHORITATIVE key, since aliases can
+// collide; the id8 always disambiguates. e.g. "[loon 0c854195]".
+const sessionId = String(session.sessionId ?? "");
+const sessionTag = `${process.env.AGENT_RELAY_NAME || aliasFor(sessionId)} ${sessionId.slice(0, 8)}`.trim();
+
+// Resolve the canonical data dir once (pure but can throw on an odd HOME); reused for
+// the log location AND the boot line below.
+let dataDir = null;
 try {
-  fileLog = createRollingFileLog({ dir: join(resolveDataDir(), "logs") });
+  dataDir = resolveDataDir();
 } catch {
   /* data dir unresolvable → degrade to timeline-only logging */
 }
 
-// Route the transport's diagnostics through BOTH the session log (live timeline) and
-// the rolling file log (durable). Fire-and-forget, but never let a logging failure
-// escape as an unhandled rejection — these fire from background poll/sweep timers
-// too, outside any try/catch.
+// A rolling on-disk log in the canonical data dir, so diagnostics survive after the
+// live session timeline scrolls away — and exist even when no session is watching.
+// Best-effort: created defensively, and the logger itself never throws.
+let fileLog = () => {};
+if (dataDir) {
+  try {
+    fileLog = createRollingFileLog({ dir: join(dataDir, "logs"), tag: sessionTag });
+  } catch {
+    /* logger construction failed → degrade to timeline-only logging */
+  }
+}
+
+// Route the relay's diagnostics through BOTH the session log (live timeline) and the
+// rolling file log (durable, tagged + levelled). Fire-and-forget, but never let a
+// logging failure escape as an unhandled rejection — these fire from background
+// poll/sweep timers too, outside any try/catch.
 const relayLog = (msg, opts) => {
   try {
     Promise.resolve(session.log?.(msg, opts)).catch(() => {});
   } catch {
     /* a logging failure must never disrupt the relay */
   }
-  fileLog(msg);
+  fileLog(msg, opts);
 };
 
 // Surface which .env (if any) seeded the config — handy when diagnosing why a
@@ -176,6 +199,14 @@ const retry = isCrossMachine
   ? { attempts: 3, attemptTimeoutMs: 30_000, backoffsMs: [2_000, 4_000] }
   : undefined;
 
+// One boot line establishes the per-session context every later line is read against:
+// which mesh this session is on (local single-machine vs the postgres host) and where
+// its data + logs live. Without it, a shared log can't be correlated to a transport.
+relayLog(
+  `boot transport=${isCrossMachine ? `postgres host=${process.env.AGENT_RELAY_PG_HOST ?? "?"}` : "local"}` +
+    ` datadir=${dataDir ?? "?"}`,
+);
+
 try {
   // All substrate composition lives in config.mjs; the entry only supplies the
   // session + log + retry policy and performs the boot via the testable bootstrap.
@@ -189,7 +220,7 @@ try {
   self = started.self;
   transport = started.transport;
   ready = true;
-  relayLog(`agent-relay: registered as "${self.name}" — ready`);
+  relayLog(`agent-relay: registered as "${self.name}" on ${self.deviceName ?? "?"} — ready`);
   // If a teardown was requested while we were booting, honor it now.
   if (cleanedUp) {
     cleanedUp = false;

@@ -39,12 +39,16 @@ const defaultFs = {
  * @param {string} opts.dir                directory the logs live in (created on demand)
  * @param {number} [opts.rotateAfterMs]    age at which the current file rotates (default 24h)
  * @param {number} [opts.keep]             rolled files retained besides the current (default 3)
+ * @param {string} [opts.tag]              per-session tag prefixed on every line, e.g.
+ *                                         "loon 0c854195" (alias + session-id prefix)
  * @param {() => number} [opts.now]        clock seam, ms since epoch (default Date.now)
  * @param {typeof defaultFs} [opts.fs]     fs seam for tests
- * @returns {(line: string) => void}       append one line (an ISO timestamp is prepended)
+ * @returns {(line: string, opts?: { level?: string }) => void}  append one line; rendered
+ *   as `<ISO> [tag] <LEVEL> <line>` (LEVEL from opts.level, default INFO).
  */
 export function createRollingFileLog({
   dir,
+  tag = "",
   rotateAfterMs = DAY_MS,
   keep = 3,
   now = Date.now,
@@ -62,7 +66,9 @@ export function createRollingFileLog({
     if (fs.existsSync(current)) fs.renameSync(current, rolled(1)); // current -> .1
   }
 
-  return function write(line) {
+  const prefix = tag ? `[${tag}] ` : "";
+
+  return function write(line, opts) {
     try {
       fs.mkdirSync(dir, { recursive: true });
       const t = now();
@@ -73,7 +79,10 @@ export function createRollingFileLog({
         rotate();
         periodStart = t;
       }
-      fs.appendFileSync(current, `${new Date(t).toISOString()} ${line}\n`);
+      fs.appendFileSync(
+        current,
+        `${new Date(t).toISOString()} ${prefix}${levelLabel(opts)} ${line}\n`,
+      );
     } catch {
       /* logging must never disrupt the relay */
     }
@@ -91,5 +100,24 @@ function fileStart(fs, path) {
     return Number.isNaN(ms) ? null : ms;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Map a relay log level to a fixed-width 5-char label, so the level column stays
+ * aligned across lines. Mirrors the session-log levels (error/warning/debug); the
+ * default — and the common case (send/recv/boot) — is INFO.
+ */
+function levelLabel(opts) {
+  switch (opts && opts.level) {
+    case "error":
+      return "ERROR";
+    case "warning":
+    case "warn":
+      return "WARN ";
+    case "debug":
+      return "DEBUG";
+    default:
+      return "INFO ";
   }
 }

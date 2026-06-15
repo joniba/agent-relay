@@ -98,6 +98,24 @@ test("sendMessage routes through transport and returns ok+id", async () => {
   assert.equal(res.id, transport.sent[0].id);
 });
 
+test("sendMessage notes a 'sent' line (id + recipient, no body) via sink.log", async () => {
+  const { relay, sink } = makeRelay();
+  const res = await relay.sendMessage({ to: "bob", content: "secret payload" });
+  const line = sink.logs.find((l) => /^sent /.test(l.message));
+  assert.ok(line, "a 'sent' observability line was logged");
+  assert.match(line.message, new RegExp(`sent msg=${res.id} to=bob`));
+  assert.doesNotMatch(line.message, /secret payload/, "the message body is never logged");
+});
+
+test("a failing sink.log never breaks send (observability is fire-and-forget)", async () => {
+  const sink = new FakeSink();
+  sink.failLog = true;
+  const transport = new FakeTransport();
+  const relay = createRelay({ sink, self: SELF, transport, interceptors: [] });
+  const res = await relay.sendMessage({ to: "bob", content: "x" });
+  assert.equal(res.ok, true, "send still succeeds even though sink.log throws");
+});
+
 test("sendMessage rejects self-send by name and by id", async () => {
   const { relay, transport } = makeRelay();
   const byName = await relay.sendMessage({ to: "alice", content: "x" });
@@ -133,6 +151,17 @@ test("inbound message wakes the agent with the default prompt", async () => {
   assert.equal(sink.wakes.length, 1);
   assert.match(sink.wakes[0], /bob/);
   assert.match(sink.wakes[0], /hello there/);
+});
+
+test("inbound delivery notes a 'recv' line (id + sender, no body) via sink.log", async () => {
+  const { relay, sink, transport } = makeRelay();
+  relay.start();
+  const msg = createMessage({ from: "bob", to: "alice", body: "hello there" });
+  await transport.deliver(msg);
+  const line = sink.logs.find((l) => /^recv /.test(l.message));
+  assert.ok(line, "a 'recv' observability line was logged");
+  assert.match(line.message, new RegExp(`recv msg=${msg.id} from=bob`));
+  assert.doesNotMatch(line.message, /hello there/, "the message body is never logged");
 });
 
 // ─── interceptors ────────────────────────────────────────────────

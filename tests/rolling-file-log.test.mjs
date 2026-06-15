@@ -40,13 +40,27 @@ const DIR = "/d";
 const C = join(DIR, "agent-relay.log");
 const R = (n) => join(DIR, `agent-relay.${n}.log`);
 
-test("appends an ISO-timestamped line to the current log", () => {
+test("appends an ISO-timestamped INFO line to the current log", () => {
   let t = 1_700_000_000_000;
   const fs = memFs(() => t);
   const log = createRollingFileLog({ dir: "/d", now: () => t, fs });
   log("hello world");
   const content = fs._files.get(C).content;
-  assert.match(content, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z hello world\n$/);
+  assert.match(content, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z INFO  hello world\n$/);
+});
+
+test("prefixes a [tag] and renders the level label per line", () => {
+  let t = 1_700_000_000_000;
+  const fs = memFs(() => t);
+  const log = createRollingFileLog({ dir: "/d", tag: "loon 0c854195", now: () => t, fs });
+  log("boot transport=local");
+  log("connect failed", { level: "error" });
+  log("sweep", { level: "debug" });
+  const lines = fs._files.get(C).content.trimEnd().split("\n");
+  // ISO timestamp MUST stay at chars 0..23 so cross-restart period-resume still parses it.
+  assert.match(lines[0], /^\d{4}-\d{2}-\d{2}T[\d:.]+Z \[loon 0c854195\] INFO  boot transport=local$/);
+  assert.match(lines[1], /^\S+ \[loon 0c854195\] ERROR connect failed$/);
+  assert.match(lines[2], /^\S+ \[loon 0c854195\] DEBUG sweep$/);
 });
 
 test("does NOT rotate while the current file is younger than the window", () => {

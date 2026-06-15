@@ -57,7 +57,12 @@ const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *   transport: import('./seams/transport.mjs').Transport,
  * }>}
  */
-export async function startRelaySession({ session, createConfig, log = () => {}, retry, sleep = defaultSleep }) {
+export async function startRelaySession({ session, createConfig, log, retry, sleep = defaultSleep }) {
+  // Bootstrap's own diagnostics (boot / connect-retry) need a callable, so default a
+  // no-op here. The SINK, by contrast, receives the RAW `log`: when no logger is
+  // injected it must fall back to the session's own log (its documented default),
+  // NOT to this no-op — otherwise the core's send/recv/poison lines vanish.
+  const diag = log ?? (() => {});
   const initial = createConfig();
   const self = await initial.identity.resolve(session);
   // Display-only device name (the machine this session runs on). Surfaced in the
@@ -68,12 +73,14 @@ export async function startRelaySession({ session, createConfig, log = () => {},
 
   const { transport, interceptors } = await bringUpWithRetry(
     { initial, createConfig, self },
-    { log, retry, sleep },
+    { log: diag, retry, sleep },
   );
 
   // The Sink is the runtime-specific seam: this Copilot entry wakes via
-  // session.send(); an ACP entry would build an ACP sink here instead.
-  const sink = createCopilotSink(session);
+  // session.send(); an ACP entry would build an ACP sink here instead. The tee'd
+  // `log` is injected so the core's send/recv/poison lines reach the rolling file;
+  // when omitted, the sink falls back to `session.log`.
+  const sink = createCopilotSink(session, log);
   const relay = createRelay({ sink, self, transport, interceptors: interceptors ?? [] });
   relay.start();
   return { relay, self, transport };

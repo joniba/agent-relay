@@ -25,6 +25,18 @@ import { runChain, renderPrompt } from "./interceptors.mjs";
  * @returns {{ sendMessage: Function, listAgents: Function, start: Function, stop: Function }}
  */
 export function createRelay({ sink, self, transport, interceptors = [] }) {
+  // Fire-and-forget observability via the Sink's optional log seam. Never awaited
+  // and never throws, so it can't slow or break delivery — distinct from the poison
+  // path below, which logs a DROP decision. Lines are metadata only (ids, never bodies).
+  function note(line) {
+    if (typeof sink.log !== "function") return;
+    try {
+      Promise.resolve(sink.log(line)).catch(() => {});
+    } catch {
+      /* observability must never disrupt the relay */
+    }
+  }
+
   /**
    * `send_message` tool handler. Plain in/out shape; the SDK adapter (bootstrap)
    * maps tool-call args to this and formats the result.
@@ -48,7 +60,9 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
     if (!result || !result.accepted) {
       return { ok: false, error: (result && result.error) || "transport rejected the message" };
     }
-    return { ok: true, id: result.id ?? gated.id };
+    const id = result.id ?? gated.id;
+    note(`sent msg=${id} to=${to}`);
+    return { ok: true, id };
   }
 
   /**
@@ -92,6 +106,7 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
       }
       return;
     }
+    note(`recv msg=${message.id} from=${message.from}`);
     // Wake failures propagate → the transport may redeliver.
     await sink.wake(prompt);
   }
