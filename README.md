@@ -21,9 +21,9 @@ Copilot.
 
 > **Dependencies are opt-in.** The single-machine default uses Node's built-in SQLite and needs
 > **no packages** — just clone and install. Only the **cross-machine** transport needs `pg` plus the
-> Azure credential lib (`@azure/identity`), both loaded lazily — so run `npm install` *before*
-> installing **only if** you want cross-machine messaging; the script then bundles `node_modules`
-> into the install.
+> Azure credential lib (`@azure/identity`), both loaded lazily. The PowerShell **cross-machine setup
+> below runs `npm install` for you**; you only need to run it yourself for the bash installer or a
+> manual install. (See *Cross-machine messaging* for the one-command setup.)
 
 ```powershell
 # Windows / PowerShell
@@ -156,67 +156,62 @@ prints a password — there isn't one.
 
 ### 2. Enable cross-machine on each machine
 
-On every machine that should join the **same** mesh:
+On every machine that should join the **same** mesh, do **one** thing — drop in a `.env`, then run
+the installer. It detects cross-machine and does the rest.
 
-**a. Install the dependency.** Cross-machine needs `pg`, so in the clone run `npm install`, then
-**(re-)run the install script** so `node_modules` is bundled into the installed extension:
-
-```powershell
-cd agent-relay; npm install; pwsh scripts/install.ps1     # bash: npm install && scripts/install.sh
-```
-
-**b. Provide the same four (non-secret) values** via a **gitignored `.env`**. The extension reads
-`.env` from the **installed** directory, so put it where the install will see it — either create
-`extension/.env` in the clone **before (re-)running install** (it's copied in), drop it straight
-into `~/.copilot/extensions/agent-relay/.env`, or point `$AGENT_RELAY_ENV_FILE` at it. Start from
-`.env.example`:
+**Create `extension/.env` in the clone** with the four (non-secret) values from step 1 — quote any
+value containing `#` (start from `.env.example`):
 
 ```ini
-# .env  — quote any value containing '#' (e.g. the Entra guest UPN)
+# extension/.env  — copied into the install; the extension auto-loads it at startup
 AGENT_RELAY_TRANSPORT=postgres
 AGENT_RELAY_PG_HOST=pg-agent-relay-<unique>.postgres.database.azure.com
 AGENT_RELAY_PG_USER="<your-entra-admin-upn>"
 AGENT_RELAY_PG_DB=agentrelay
-# AZURE_CONFIG_DIR=C:\path\to\.azure-relay   # mint the token as the DB admin
+# AZURE_CONFIG_DIR=C:\path\to\.azure-relay   # optional: isolate the az profile used for the token
 ```
 
-Shell-exported values take precedence over the file, so you can still override ad-hoc.
-
-<details><summary>Prefer plain shell exports instead?</summary>
+**Then run the installer:**
 
 ```powershell
-# PowerShell
+pwsh scripts/install.ps1        # auto-detects cross-machine from the .env
+```
+
+Because the `.env` selects Postgres, the installer runs a **setup preflight** and does everything
+for you, stopping with a specific message if anything's wrong:
+
+1. checks the **Azure CLI** is installed,
+2. validates the `.env` has `AGENT_RELAY_PG_HOST` / `_USER` / `_DB`,
+3. runs **`npm install`** (fetches `pg` + `@azure/identity`) and bundles them into the install,
+4. **signs you in** — if you're not authenticated it launches **`az login`** (sign in as the DB
+   admin). If plain `az login` fails on a headless machine, run `az login --use-device-code` yourself
+   and re-run,
+5. **verifies a real connection** to the shared database end-to-end.
+
+If verification fails, the message tells you exactly what to fix — e.g. *wrong account* (“sign in as
+the DB admin”), *unreachable host*, or *not signed in* — then re-run. (The extension is still
+installed and runs in **local** mode until cross-machine is fixed.)
+
+> Each machine mints its **own** short-lived Entra token locally via its own `az login` — **tokens
+> are never copied between machines**. The four `.env` values are not secrets (a hostname, a
+> username, a database name). With the default provisioning there's exactly one DB admin, so every
+> machine must `az login` as **that same account** (`AGENT_RELAY_PG_USER`); a token for any other
+> account authenticates to Azure but is rejected by the database.
+
+<details><summary>Plain shell exports instead of a <code>.env</code></summary>
+
+Export the four values in your shell (these **win** over a `.env` if both are set), then run the
+installer — it still does the deps + `az login` + verification for you:
+
+```powershell
 $env:AGENT_RELAY_TRANSPORT = 'postgres'
 $env:AGENT_RELAY_PG_HOST   = 'pg-agent-relay-<unique>.postgres.database.azure.com'
 $env:AGENT_RELAY_PG_USER   = '<your-entra-admin-upn>'
 $env:AGENT_RELAY_PG_DB     = 'agentrelay'
-```
-
-```bash
-# bash / zsh
-export AGENT_RELAY_TRANSPORT=postgres
-export AGENT_RELAY_PG_HOST='pg-agent-relay-<unique>.postgres.database.azure.com'
-export AGENT_RELAY_PG_USER='<your-entra-admin-upn>'
-export AGENT_RELAY_PG_DB=agentrelay
+# $env:AZURE_CONFIG_DIR    = '<dir>'   # optional: isolate the az profile
+pwsh scripts/install.ps1 -CrossMachine
 ```
 </details>
-
-These are **not secrets** — a hostname, a username, and a database name. The actual credential is
-a short-lived Entra token each machine mints **locally** from its own `az login`; **tokens are
-never copied between machines**. With the default provisioning script there is exactly one DB
-admin, so **each machine must `az login` as the same Entra principal printed as
-`AGENT_RELAY_PG_USER`** — a different account can still mint a token but will fail Postgres auth
-(and the session then falls back to local SQLite for that run). Granting additional DB users is a
-separate, manual step.
-
-Sanity-check that a machine can **acquire a token** for the Postgres scope — **without printing the
-token itself**. (This proves only token acquisition, not server reachability, the DB, TLS, or that
-your identity matches `AGENT_RELAY_PG_USER` — a successful boot is the real end-to-end check.)
-
-```powershell
-az account get-access-token --scope https://ossrdbms-aad.database.windows.net/.default `
-  --query "{token_ok: (accessToken != null), expires: expiresOn}" -o json
-```
 
 ### 3. Run
 
@@ -224,7 +219,8 @@ az account get-access-token --scope https://ossrdbms-aad.database.windows.net/.d
 copilot --experimental
 ```
 
-Sessions on any machine carrying those env vars join one cross-machine mesh. `list_relay_agents`
+Sessions on any machine with those settings (in `.env` or the environment) join one cross-machine
+mesh. `list_relay_agents`
 shows everyone, each tagged with its **device name** (the machine's hostname; override with
 `AGENT_RELAY_HOST`) so you can tell hosts apart — it's display-only, never used for addressing.
 
