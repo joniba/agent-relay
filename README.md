@@ -107,8 +107,14 @@ overrides for the defaults:
 | `AGENT_RELAY_TRANSPORT` | `postgres` to join a cross-machine mesh (see below) | local SQLite |
 | `AGENT_RELAY_PG_HOST` / `_USER` / `_DB` | Shared Postgres connection settings (non-secret) | — |
 | `AGENT_RELAY_HOST` | Device name shown beside each peer in the roster | the machine's hostname |
+| `AGENT_RELAY_ENV_FILE` | Explicit path to a `.env` to load | `extension/.env`, then repo-root `.env` |
 
 > All sessions that share an `AGENT_RELAY_DB` (or a single global install) form one mesh.
+
+> **`.env` support:** any of these may be set in a gitignored `.env` (auto-loaded from
+> `extension/.env`, the repo root, or `$AGENT_RELAY_ENV_FILE`) instead of being exported — handy for
+> the cross-machine settings below. Shell-exported values take precedence. Copy `.env.example` to
+> start.
 
 ## Cross-machine messaging (Azure Postgres)
 
@@ -146,8 +152,27 @@ prints a password — there isn't one.
 
 ### 2. Distribute the (non-secret) config to each machine
 
-Every machine/session that should join the **same** mesh exports the **same** four values — e.g.
-in your shell profile:
+Every machine/session that should join the **same** mesh provides the **same** four values. The
+tidiest way is a **gitignored `.env` file** in the project (so you don't re-export them in every
+shell); copy the template and fill it in:
+
+```powershell
+cp .env.example extension/.env        # gitignored; auto-loaded at startup
+```
+
+```ini
+# extension/.env  — quote any value containing '#' (e.g. the Entra guest UPN)
+AGENT_RELAY_TRANSPORT=postgres
+AGENT_RELAY_PG_HOST=pg-agent-relay-<unique>.postgres.database.azure.com
+AGENT_RELAY_PG_USER="<your-entra-admin-upn>"
+AGENT_RELAY_PG_DB=agentrelay
+# AZURE_CONFIG_DIR=C:\path\to\.azure-relay   # mint the token as the DB admin
+```
+
+It's loaded automatically from `extension/.env` (or the repo root, or `$AGENT_RELAY_ENV_FILE`).
+Anything you **also** export in the shell takes precedence, so you can still override ad-hoc.
+
+<details><summary>Prefer plain shell exports instead?</summary>
 
 ```powershell
 # PowerShell
@@ -164,6 +189,7 @@ export AGENT_RELAY_PG_HOST='pg-agent-relay-<unique>.postgres.database.azure.com'
 export AGENT_RELAY_PG_USER='<your-entra-admin-upn>'
 export AGENT_RELAY_PG_DB=agentrelay
 ```
+</details>
 
 These are **not secrets** — a hostname, a username, and a database name. The actual credential is
 a short-lived Entra token each machine mints **locally** from its own `az login`; **tokens are

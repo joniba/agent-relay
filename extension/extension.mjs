@@ -8,9 +8,15 @@
 // Requires `copilot --experimental` (extensions are gated behind it) and Node 22+.
 
 import { joinSession } from "@github/copilot-sdk/extension";
+import { loadEnvFile } from "./env-file.mjs";
 import { createConfig, createFallbackConfig } from "./config.mjs";
 import { startRelaySession } from "./bootstrap.mjs";
 import { formatRoster } from "./roster.mjs";
+
+// Load project-local config from a gitignored `.env` (if present) BEFORE anything
+// reads process.env — fills gaps only, so shell-exported vars still win. Lets the
+// cross-machine settings live with the project instead of in every shell.
+const loadedEnvFile = loadEnvFile();
 
 // Assigned during bootstrap (after joinSession resolves). The tool/hook handlers
 // below close over these and tolerate being called before bootstrap completes.
@@ -134,6 +140,15 @@ const relayLog = (msg, opts) => {
     /* a logging failure must never disrupt the relay */
   }
 };
+
+// Surface which .env (if any) seeded the config — handy when diagnosing why a
+// session did or didn't join the cross-machine mesh.
+if (loadedEnvFile) {
+  relayLog(
+    `agent-relay: loaded config from ${loadedEnvFile.path}` +
+      (loadedEnvFile.applied.length ? ` (set ${loadedEnvFile.applied.join(", ")})` : " (no new keys)"),
+  );
+}
 
 // Fall back to the local SQLite transport ONLY when the primary is the remote
 // (cross-machine) substrate — falling local→local would just retry the same
