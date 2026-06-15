@@ -8,9 +8,15 @@
 // Requires `copilot --experimental` (extensions are gated behind it) and Node 22+.
 
 import { joinSession } from "@github/copilot-sdk/extension";
-import { createConfig } from "./config.mjs";
-import { createRelay } from "./core/relay.mjs";
-import { createCopilotSink } from "./sinks/copilot.mjs";
+import { loadEnvFile } from "./env-file.mjs";
+import { createConfig, createFallbackConfig } from "./config.mjs";
+import { startRelaySession } from "./bootstrap.mjs";
+import { formatRoster } from "./roster.mjs";
+
+// Load project-local config from a gitignored `.env` (if present) BEFORE anything
+// reads process.env — fills gaps only, so shell-exported vars still win. Lets the
+// cross-machine settings live with the project instead of in every shell.
+const loadedEnvFile = loadEnvFile();
 
 // Assigned during bootstrap (after joinSession resolves). The tool/hook handlers
 // below close over these and tolerate being called before bootstrap completes.
@@ -79,9 +85,7 @@ const tools = [
           resultType: "success",
         };
       }
-      const lines = agents
-        .map((a) => `- ${a.name}${a.self ? " (you)" : ""}  [id: ${a.id}]`)
-        .join("\n");
+      const lines = formatRoster(agents);
       return {
         textResultForLlm: `Reachable agent-relay sessions:\n${lines}`,
         resultType: "success",
@@ -125,17 +129,45 @@ async function shutdown() {
 
 const session = await joinSession({ tools, hooks });
 
+// Route the transport's diagnostics through the session log (observability).
+// Fire-and-forget, but never let a logging failure escape as an unhandled
+// rejection — these fire from background poll/sweep timers too, outside any
+// try/catch (mirrors the guarding around session.log/sink.log elsewhere).
+const relayLog = (msg, opts) => {
+  try {
+    Promise.resolve(session.log?.(msg, opts)).catch(() => {});
+  } catch {
+    /* a logging failure must never disrupt the relay */
+  }
+};
+
+// Surface which .env (if any) seeded the config — handy when diagnosing why a
+// session did or didn't join the cross-machine mesh.
+if (loadedEnvFile) {
+  relayLog(
+    `agent-relay: loaded config from ${loadedEnvFile.path}` +
+      (loadedEnvFile.applied.length ? ` (set ${loadedEnvFile.applied.join(", ")})` : " (no new keys)"),
+  );
+}
+
+// Fall back to the local SQLite transport ONLY when the primary is the remote
+// (cross-machine) substrate — falling local→local would just retry the same
+// failing store and makes the "cross-machine unavailable" log accurate.
+const fallbackFactory =
+  process.env.AGENT_RELAY_TRANSPORT === "postgres" ? createFallbackConfig : undefined;
+
 try {
-  const config = createConfig();
-  transport = config.transport;
-  self = await config.identity.resolve(session);
-  await transport.init({ self, credentials: config.credentials });
-  await transport.register(self);
-  // The Sink is the runtime-specific seam: this Copilot entry wakes via
-  // session.send(); an ACP entry would build an ACP sink here instead.
-  const sink = createCopilotSink(session);
-  relay = createRelay({ sink, self, transport, interceptors: config.interceptors });
-  relay.start();
+  // All substrate/fallback composition lives in config.mjs; the entry only
+  // supplies the session + log and performs the boot via the testable bootstrap.
+  const started = await startRelaySession({
+    session,
+    createConfig: () => createConfig({ log: relayLog }),
+    fallbackFactory,
+    log: relayLog,
+  });
+  relay = started.relay;
+  self = started.self;
+  transport = started.transport;
   ready = true;
   await session.log?.(`agent-relay: registered as "${self.name}" — ready`);
   // If a teardown was requested while we were booting, honor it now.

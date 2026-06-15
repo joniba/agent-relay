@@ -1,8 +1,19 @@
 # Specs are local-only working artifacts (requirements/design/plan + probes)
 spec/
 
+# Playwright MCP scratch (browser snapshots/logs)
+.playwright-mcp/
+
+# Phase-2 throwaway spike (Azure PG validation)
+spike-postgres/
+
 # Node
 node_modules/
+
+# Local environment / secrets — never commit connection settings or tokens
+.env
+.env.*
+!.env.example
 
 # Local mesh state + logs (the default sqlite-poll transport's store)
 *.db

@@ -6,28 +6,27 @@
  *   { "statusLine": { "type": "command",
  *       "command": "node C:/…/extensions/agent-relay/bin/agent-relay-statusline.mjs" } }
  *
+ * Shows THIS session's agent-relay alias as `[<name>]` below the prompt.
+ *
+ * The alias is a DETERMINISTIC function of the local session id — the same
+ * derivation the identity provider uses — so we compute it directly here. That
+ * means NO database read and NO network, and it is transport-agnostic: it works
+ * whether the session joined the local SQLite mesh or the cross-machine Postgres
+ * mesh. Precedence mirrors the identity provider: an explicit AGENT_RELAY_NAME
+ * wins, else the wordlist alias. (A registry collision could in theory bump the
+ * registered name off this first choice; that rare case isn't reflected here.)
+ *
  * Contract (mirrors the Copilot CLI statusline protocol):
  *   - The CLI invokes us on each statusline refresh, piping a JSON document on
  *     stdin that includes `session_id` (the local Copilot session id).
- *   - We look up THIS session's registered agent-relay name in the local
- *     registry (the same sqlite store the extension registers into) and emit a
- *     single visible line `[<name>]`.
- *   - Unknown session (agent-relay not running / not registered yet) or any
- *     error → emit NOTHING (Copilot's own statusline shows). Never throw.
- *
- * The name is generated locally and is available the instant the session
- * registers (read here from agent-relay's own registry), with no external
- * service.
- *
- * Performance: a single indexed lookup on a tiny table; must stay well under
- * 100ms. Failure isolation: ANY error → empty line, exit 0.
+ *   - Unknown session / any error → emit NOTHING (Copilot's own statusline
+ *     shows). Never throw. Failure isolation: ANY error → empty line, exit 0.
  */
 
-import { existsSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { aliasFor } from "../identity/local-alias.mjs";
 
 /** Strip C0 control chars + DEL so the rendered statusline can't be injected. */
 export function stripControlChars(s) {
@@ -35,36 +34,19 @@ export function stripControlChars(s) {
   return s.replace(/[\x00-\x1f\x7f]/g, "");
 }
 
-/** Where the default sqlite-poll transport keeps its store (see config.mjs). */
-export function resolveDbPath() {
-  return process.env.AGENT_RELAY_DB || join(__dirname, "..", "agent-relay.db");
-}
-
 /**
- * Look up the registered name for a session id in the agent-relay registry.
- * Returns the name, or null when unknown / unavailable. Never throws. Opens
- * read-write (so a WAL store is handled), but only ever SELECTs; guarded by an
- * existence check so it never CREATES the store. `node:sqlite` is imported
- * dynamically so a runtime without it degrades to null rather than throwing at
- * module load (this script runs under whatever `node` is on PATH).
+ * Resolve THIS session's alias from its session id — explicit AGENT_RELAY_NAME
+ * override wins, else the deterministic wordlist alias (same as the identity
+ * provider). Pure; no DB, no network. Returns null when there's no session id.
+ *
+ * @param {string} sessionId
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string|null}
  */
-export async function lookupName(sessionId, dbPath = resolveDbPath()) {
-  if (!sessionId || !existsSync(dbPath)) return null;
-  let db;
-  try {
-    const { DatabaseSync } = await import("node:sqlite");
-    db = new DatabaseSync(dbPath);
-    const row = db.prepare("SELECT name FROM agents WHERE id = ?").get(sessionId);
-    return row && typeof row.name === "string" ? row.name : null;
-  } catch {
-    return null;
-  } finally {
-    try {
-      db?.close();
-    } catch {
-      /* ignore */
-    }
-  }
+export function resolveName(sessionId, env = process.env) {
+  if (!sessionId) return null;
+  if (env.AGENT_RELAY_NAME) return env.AGENT_RELAY_NAME;
+  return aliasFor(sessionId);
 }
 
 /** Pure: name → statusline text (may be empty). */
@@ -108,7 +90,7 @@ async function main() {
   }
   let name = null;
   try {
-    if (input && typeof input.session_id === "string") name = await lookupName(input.session_id);
+    if (input && typeof input.session_id === "string") name = resolveName(input.session_id);
   } catch {
     /* fall through to silent */
   }
