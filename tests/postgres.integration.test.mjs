@@ -383,6 +383,37 @@ test("sweep deletes old messages + long-stale agents, keeps fresh ones", { skip 
   }
 });
 
+test("sweep logging is silent by default and verbose under debug", { skip }, async () => {
+  // debug off (default): a sweep — even one that wins the lock — logs nothing.
+  const quietLogs = [];
+  const quiet = makeTransport({ log: (m) => quietLogs.push(m) });
+  // debug on: the same no-op sweep logs its result line.
+  const loudLogs = [];
+  const loud = makeTransport({ debug: true, log: (m) => loudLogs.push(m) });
+  try {
+    await quiet.init(ctx("sw-quiet", "q"));
+    await quiet.register(ident("sw-quiet", "q"));
+    const q = await quiet.sweep();
+    assert.equal(q.swept, true, "the quiet session wins the sweep lock");
+    assert.ok(
+      !quietLogs.some((m) => m.includes("postgres sweep:")),
+      "no sweep line is logged when debug is off",
+    );
+
+    await loud.init(ctx("sw-loud", "l"));
+    await loud.register(ident("sw-loud", "l"));
+    const l = await loud.sweep();
+    assert.equal(l.swept, true, "the loud session wins the sweep lock");
+    assert.ok(
+      loudLogs.some((m) => m.includes("postgres sweep:")),
+      "the sweep result is logged when debug is on (even on a no-op)",
+    );
+  } finally {
+    await quiet.stop();
+    await loud.stop();
+  }
+});
+
 test("sweep no-ops (does not delete) when another session holds the sweep lock", { skip }, async () => {
   const a = makeTransport();
   await a.init(ctx("swl-a", "alpha"));

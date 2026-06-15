@@ -67,6 +67,7 @@ export function createPostgresTransport({
   messageTtlMs = 86_400_000,
   agentRetentionMs = 604_800_000,
   log = () => {},
+  debug = false,
 } = {}) {
   if (!host) throw new Error("postgres transport requires a host");
   if (!user) throw new Error("postgres transport requires a user");
@@ -179,9 +180,11 @@ export function createPostgresTransport({
         [agentRetentionSecs],
       );
       await client.query("COMMIT");
-      // Only log when the sweep actually removed something — a no-op sweep every
-      // cycle is just noise in the session timeline.
-      if (msgs.rowCount > 0 || agents.rowCount > 0) {
+      // Routine cleanup is background noise in the session timeline, so it's
+      // silent by default. Enable `debug` (AGENT_RELAY_DEBUG) to trace EVERY
+      // sweep — including no-ops — when diagnosing whether cleanup is running.
+      // Sweep ERRORS (below) are NOT gated: a failing sweep is a real fault.
+      if (debug) {
         log(`postgres sweep: removed ${msgs.rowCount} message(s), ${agents.rowCount} stale agent(s)`);
       }
       return { swept: true, messages: msgs.rowCount, agents: agents.rowCount };

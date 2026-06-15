@@ -182,8 +182,10 @@ if ($Link) {
 }
 else {
     # Self-contained copy, lock-safe. Refresh code in place: remove the existing
-    # CODE (everything EXCEPT *.db*), then copy extension/ + node_modules. The
-    # locked DB is excluded from the removal, so this works while a session runs.
+    # CODE (everything EXCEPT *.db* and node_modules), then copy extension/ and
+    # sync node_modules incrementally. Excluding *.db* keeps the locked runtime DB
+    # (a session may hold it open); excluding node_modules lets the robocopy below
+    # skip unchanged dependency files, so a re-install is near-instant.
     if (Test-Path -LiteralPath $dest) {
         $existing = Get-Item -LiteralPath $dest -Force
         if ($existing.LinkType) {
@@ -192,7 +194,7 @@ else {
         }
         else {
             Get-ChildItem -LiteralPath $dest -Force |
-                Where-Object { $_.Name -notlike $dbGlob } |
+                Where-Object { $_.Name -notlike $dbGlob -and $_.Name -ne 'node_modules' } |
                 Remove-Item -Recurse -Force
         }
     }
@@ -200,12 +202,23 @@ else {
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
     }
     Copy-Item -Recurse -Force (Join-Path $source '*') $dest
-    # Bundle dependencies if present. Cross-machine users ran `npm install`; the
-    # single-machine default needs none, so a missing node_modules is fine.
+    # Sync dependencies with robocopy: multithreaded and INCREMENTAL — it skips
+    # files whose size+timestamp are unchanged, so re-installs where node_modules
+    # didn't change finish in seconds instead of recopying tens of thousands of
+    # tiny files. Scoped to node_modules only (the DB lives at the install root and
+    # is never touched). robocopy exit codes 0-7 are success; 8+ is a real failure.
+    # Cross-machine users ran `npm install`; the single-machine default needs none,
+    # so a missing node_modules is fine.
     $deps = Join-Path $repoRoot 'node_modules'
     if (Test-Path -LiteralPath $deps) {
-        Copy-Item -Recurse -Force $deps (Join-Path $dest 'node_modules')
-        $mode = 'copied (+ node_modules)'
+        $destDeps = Join-Path $dest 'node_modules'
+        $rcOut = & robocopy $deps $destDeps /E /MT:16 /R:1 /W:1 /NFL /NDL /NJH /NJS /NP 2>&1
+        $rc = $LASTEXITCODE
+        if ($rc -ge 8) {
+            Write-Host ($rcOut | Out-String)
+            throw "robocopy failed syncing node_modules (exit $rc). Fix the error above and re-run."
+        }
+        $mode = 'copied (+ node_modules, incremental)'
     }
     else {
         $mode = 'copied (no node_modules — single-machine default only)'

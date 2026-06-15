@@ -112,6 +112,7 @@ overrides for the defaults:
 | `AGENT_RELAY_PG_HOST` / `_USER` / `_DB` | Shared Postgres connection settings (non-secret) | — |
 | `AGENT_RELAY_AZURE_TENANT` | Entra tenant id for the DB token (multi-tenant / MFA accounts) | `az` default context |
 | `AGENT_RELAY_HOST` | Device name shown beside each peer in the roster | the machine's hostname |
+| `AGENT_RELAY_DEBUG` | `1`/`true`/`yes`/`on` → log every periodic sweep (cross-machine); errors always shown | silent |
 | `AGENT_RELAY_ENV_FILE` | Explicit path to a `.env` to load | `extension/.env`, then repo-root `.env` |
 
 > All sessions that share an `AGENT_RELAY_DB` (or a single global install) form one mesh.

@@ -56,6 +56,8 @@ export function createConfig({ log = () => {} } = {}) {
         port: process.env.AGENT_RELAY_PG_PORT ? Number(process.env.AGENT_RELAY_PG_PORT) : 5432,
         // TLS on by default (Azure); a local Docker server sets AGENT_RELAY_PG_SSL=false.
         ssl: process.env.AGENT_RELAY_PG_SSL === "false" ? false : { rejectUnauthorized: true },
+        // Opt-in verbose sweep tracing (AGENT_RELAY_DEBUG=1|true|yes|on); silent otherwise.
+        debug: /^(1|true|yes|on)$/i.test(process.env.AGENT_RELAY_DEBUG ?? ""),
         log,
       }),
       interceptors: [],
