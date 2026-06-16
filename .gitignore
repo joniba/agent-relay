@@ -1,5 +1,5 @@
-# Specs are local-only working artifacts (requirements/design/plan + probes)
-spec/
+# Local-only working/planning docs (plans, designs, notes, probes) — never committed.
+working-docs/
 
 # Playwright MCP scratch (browser snapshots/logs)
 .playwright-mcp/
