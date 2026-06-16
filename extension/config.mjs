@@ -34,8 +34,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * AGENT_RELAY_NAME). No interceptors by default.
  *
  * @param {object} [opts]
- * @param {(msg: string, opts?: object) => void} [opts.log]
- *   Diagnostic sink handed to transports that emit observability events
+ * @param {import('./seams/log.mjs').Logger} [opts.log]
+ *   Diagnostic logger handed to transports that emit observability events
  *   (pool errors, dead-letter, sweep). Defaults to a no-op.
  * @returns {{
  *   identity: import('./seams/identity.mjs').IdentityProvider,

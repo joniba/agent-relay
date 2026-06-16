@@ -50,7 +50,7 @@
  * @param {number} [opts.agentRetentionMs]     Drop agent rows not heartbeating within this
  *   window (default 604_800_000 = 7 d; LONGER than the message TTL so durable exact-id
  *   delivery to an away machine isn't cut short).
- * @param {(msg: string) => void} [opts.log]   Optional diagnostic sink.
+ * @param {import('../seams/log.mjs').Logger} [opts.log]   Optional diagnostic logger.
  * @returns {import('../seams/transport.mjs').Transport}
  */
 export function createPostgresTransport({
@@ -454,7 +454,7 @@ export const TARGET_SCHEMA = 1;
  * on a newer schema than this build supports (the entry then falls back).
  *
  * @param {import('pg').Pool} pool
- * @param {(msg: string) => void} log
+ * @param {import('../seams/log.mjs').Logger} log
  */
 export async function migrate(pool, log = () => {}) {
   const client = await pool.connect();

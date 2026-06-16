@@ -9,7 +9,7 @@
  * not in the core.
  *
  * @param {import('../seams/identity.mjs').SessionLike} session
- * @param {(msg: string, opts?: object) => void} [log]  Diagnostic sink for the core's
+ * @param {import('../seams/log.mjs').Logger} [log]  Diagnostic logger for the core's
  *   observability (send/receive/poison). Defaults to `session.log`; the entry injects
  *   its tee'd logger here so the core's lines also reach the rolling file log.
  * @returns {import('../seams/sink.mjs').Sink}

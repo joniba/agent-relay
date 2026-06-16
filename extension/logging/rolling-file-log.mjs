@@ -43,8 +43,8 @@ const defaultFs = {
  *                                         "loon 0c854195" (alias + session-id prefix)
  * @param {() => number} [opts.now]        clock seam, ms since epoch (default Date.now)
  * @param {typeof defaultFs} [opts.fs]     fs seam for tests
- * @returns {(line: string, opts?: { level?: string }) => void}  append one line; rendered
- *   as `<ISO> [tag] <LEVEL> <line>` (LEVEL from opts.level, default INFO).
+ * @returns {import('../seams/log.mjs').Logger}  a Logger that appends one line,
+ *   rendered as `<ISO> [tag] <LEVEL> <line>` (LEVEL from opts.level, default INFO).
  */
 export function createRollingFileLog({
   dir,

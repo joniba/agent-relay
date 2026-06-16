@@ -48,7 +48,7 @@ const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *   transport: import('./seams/transport.mjs').Transport,
  *   interceptors?: import('./seams/interceptor.mjs').Interceptor[],
  * }} deps.createConfig  Factory: a fresh config (incl. a fresh transport) per call.
- * @param {(msg: string, opts?: object) => void} [deps.log]  Diagnostic sink.
+ * @param {import('./seams/log.mjs').Logger} [deps.log]  Diagnostic logger.
  * @param {{ attempts?: number, attemptTimeoutMs?: number, backoffsMs?: number[] }} [deps.retry]
  * @param {(ms: number) => Promise<void>} [deps.sleep]  Backoff sleep (injectable for tests).
  * @returns {Promise<{

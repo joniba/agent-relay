@@ -10,8 +10,9 @@
  *   - `isBooting() && opts.level === "warning"` — startup connect-retry warnings only;
  *                                  runtime warnings (sweeps, dead-letters) stay file-only
  *
- * Fire-and-forget + failure-isolated: a throwing/rejecting `sessionLog` (or `fileLog`)
- * can NEVER disrupt the relay — these also fire from background poll/sweep timers,
+ * Fire-and-forget + failure-isolated: a `sessionLog` that throws OR rejects — or a
+ * `fileLog` that throws (it is itself a failure-isolated Logger, so it won't reject) —
+ * can NEVER disrupt the relay; these also fire from background poll/sweep timers,
  * outside any try/catch.
  *
  * This is the ONE place the "what the user sees in the terminal vs. only in the file"
@@ -19,10 +20,10 @@
  *
  * @param {object} deps
  * @param {(msg: string, opts?: object) => unknown} [deps.sessionLog]  Live-timeline sink.
- * @param {(msg: string, opts?: object) => void} deps.fileLog          Durable rolling-file sink.
+ * @param {import('../seams/log.mjs').Logger} deps.fileLog  Durable rolling-file sink.
  * @param {() => boolean} [deps.isBooting]  True while the session is still booting, so
  *   startup warnings surface; defaults to always-false (runtime).
- * @returns {(msg: string, opts?: { level?: string, terminal?: boolean }) => void}
+ * @returns {import('../seams/log.mjs').Logger}
  */
 export function createRelayLog({ sessionLog, fileLog, isBooting = () => false }) {
   return function relayLog(msg, opts) {
