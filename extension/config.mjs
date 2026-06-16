@@ -7,6 +7,8 @@ import { createEnvPasswordCredentials } from "./credentials/env-password.mjs";
 import { createAzureEntraCredentials } from "./azure/index.mjs";
 import { createSqlitePollTransport } from "./transports/sqlite-poll.mjs";
 import { createPostgresTransport } from "./transports/postgres.mjs";
+import { dataFile, ensureDataDir } from "./storage/paths.mjs";
+import { migrateLocalDbOnce } from "./storage/local-db.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -24,15 +26,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *         path; the Azure SDK is imported lazily inside that provider, so it is
  *         loaded ONLY here and never on the local default).
  *     This is the single cross-machine mesh.
- *   - otherwise → the zero-infra local default: SQLite-poll (DB co-located with
- *     the extension; override with AGENT_RELAY_DB), no credentials.
+ *   - otherwise →  the zero-infra local default: SQLite-poll (DB in the canonical
+  *     per-user data dir; override with AGENT_RELAY_DB or AGENT_RELAY_DATA_DIR), no
+  *     credentials.
  *
  * Identity is always the local wordlist alias (override the name with
  * AGENT_RELAY_NAME). No interceptors by default.
  *
  * @param {object} [opts]
- * @param {(msg: string, opts?: object) => void} [opts.log]
- *   Diagnostic sink handed to transports that emit observability events
+ * @param {import('./seams/log.mjs').Logger} [opts.log]
+ *   Diagnostic logger handed to transports that emit observability events
  *   (pool errors, dead-letter, sweep). Defaults to a no-op.
  * @returns {{
  *   identity: import('./seams/identity.mjs').IdentityProvider,
@@ -85,21 +88,37 @@ export function createConfig({ log = () => {} } = {}) {
 
 /**
  * The local SQLite slice (transport + its no-op credentials) — the zero-infra
- * default, and the boot-time FALLBACK target when the cross-machine transport
- * can't come up (see bootstrap.mjs). Kept here so all composition lives at the
- * root; the entry just calls it.
+ * default. Kept here so all composition lives at the root; createConfig calls it.
  *
  * @returns {{
  *   transport: import('./seams/transport.mjs').Transport,
  *   credentials: import('./seams/credentials.mjs').CredentialProvider,
  * }}
  */
-export function createFallbackConfig() {
-  return localSlice();
-}
-
 function localSlice() {
-  const dbPath = process.env.AGENT_RELAY_DB || join(__dirname, "agent-relay.db");
+  const explicitDb = process.env.AGENT_RELAY_DB;
+  if (explicitDb) {
+    return {
+      credentials: createNoneCredentials(),
+      transport: createSqlitePollTransport({ dbPath: explicitDb }),
+    };
+  }
+  // Default the local store to the canonical per-user data dir (out of the install
+  // dir). Provisioning + the one-time relocation of a legacy in-install DB are
+  // BEST-EFFORT: a filesystem failure here must never harden the zero-infra local
+  // default into a boot failure (the DB is otherwise opened lazily inside the
+  // transport, within the boot try/catch), so on ANY error we degrade to the legacy
+  // co-located path. The relocation itself is crash-safe (see storage/local-db.mjs).
+  const legacyPath = join(__dirname, "agent-relay.db");
+  let dbPath = legacyPath;
+  try {
+    ensureDataDir();
+    const canonical = dataFile("agent-relay.db");
+    migrateLocalDbOnce({ from: legacyPath, to: canonical });
+    dbPath = canonical;
+  } catch {
+    dbPath = legacyPath;
+  }
   return {
     credentials: createNoneCredentials(),
     transport: createSqlitePollTransport({ dbPath }),

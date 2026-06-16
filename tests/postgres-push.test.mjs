@@ -53,9 +53,10 @@ function makeFakePg() {
       const s = String(sql);
       this.calls.push({ sql: s, params });
       // A send() resolves its recipient by exact id first — hand one back so the
-      // INSERT + notify proceed.
-      if (/SELECT id FROM agents WHERE id = \$1/.test(s)) {
-        return { rows: [{ id: params[0] }], rowCount: 1 };
+      // INSERT + notify proceed. Match regardless of the selected column list
+      // (the transport may select id alone or id + device_name).
+      if (/FROM agents WHERE id = \$1/.test(s)) {
+        return { rows: [{ id: params[0], device_name: null }], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
     }

@@ -32,6 +32,8 @@
  * @param {string} opts.user
  * @param {string} opts.database
  * @param {number} [opts.port]                 Default 5432.
+ * @param {number} [opts.connectionTimeoutMillis] Per-connection acquire timeout so a
+ *   blocked/slow connect fails fast instead of hanging boot (default 30000).
  * @param {boolean|object} [opts.ssl]          `pg` ssl option. Default
  *   `{ rejectUnauthorized: true }`; pass `false` for a local Docker server.
  * @param {number} [opts.pollIntervalMs]       Poll cadence (default 3000).
@@ -48,7 +50,7 @@
  * @param {number} [opts.agentRetentionMs]     Drop agent rows not heartbeating within this
  *   window (default 604_800_000 = 7 d; LONGER than the message TTL so durable exact-id
  *   delivery to an away machine isn't cut short).
- * @param {(msg: string) => void} [opts.log]   Optional diagnostic sink.
+ * @param {import('../seams/log.mjs').Logger} [opts.log]   Optional diagnostic logger.
  * @returns {import('../seams/transport.mjs').Transport}
  */
 export function createPostgresTransport({
@@ -56,6 +58,7 @@ export function createPostgresTransport({
   user,
   database,
   port = 5432,
+  connectionTimeoutMillis = 30000,
   ssl = { rejectUnauthorized: true },
   pollIntervalMs = 3000,
   heartbeatIntervalMs = 9000,
@@ -261,7 +264,7 @@ export function createPostgresTransport({
       credentials = ctx.credentials; // captured for the dedicated LISTEN client (push)
       // Load `pg` on demand. If it isn't installed, this is the cross-machine
       // opt-in path without its dependency — surface a clear, actionable error
-      // (the entry then falls back to the local SQLite transport).
+      // (the entry then surfaces the failure and the relay goes inactive).
       if (!pg) {
         try {
           pg = _pg ?? (await import("pg")).default;
@@ -284,6 +287,7 @@ export function createPostgresTransport({
         max: 4,
         maxLifetimeSeconds: 2700, // recycle connections before a token would expire
         idleTimeoutMillis: 30000,
+        connectionTimeoutMillis,
       });
       // An idle-client error must never crash the host process.
       pool.on("error", (err) => log(`pg pool error: ${err.message}`));
@@ -292,7 +296,7 @@ export function createPostgresTransport({
       } catch (err) {
         // init failed (unreachable host, bad creds, refuse-newer schema, …) —
         // release the pool so a leaked idle client can't keep the process alive,
-        // then rethrow so the entry can fall back.
+        // then rethrow so the caller can retry (on a fresh instance) or surface it.
         try {
           await pool.end();
         } catch {
@@ -332,12 +336,15 @@ export function createPostgresTransport({
     async send(message) {
       // Exact id resolves a KNOWN agent even if offline/stale (durable delivery
       // to an away machine); a NAME resolves only a LIVE agent (never a freed
-      // alias), most-recently-heartbeating wins.
-      let recipient = (await pool.query("SELECT id FROM agents WHERE id = $1", [message.to])).rows[0];
+      // alias), most-recently-heartbeating wins. `device_name` is carried for
+      // diagnostics (logging the target machine of a cross-machine send).
+      let recipient = (
+        await pool.query("SELECT id, device_name FROM agents WHERE id = $1", [message.to])
+      ).rows[0];
       if (!recipient) {
         recipient = (
           await pool.query(
-            `SELECT id FROM agents
+            `SELECT id, device_name FROM agents
              WHERE name = $1 AND online AND last_heartbeat >= now() - make_interval(secs => $2)
              ORDER BY last_heartbeat DESC LIMIT 1`,
             [message.to, staleSecs],
@@ -373,7 +380,7 @@ export function createPostgresTransport({
         // loses it (the poll delivers it). Swallow to avoid an unhandled rejection.
         void pool.query("SELECT pg_notify($1, $2)", [PUSH_CHANNEL, recipient.id]).catch(() => {});
       }
-      return { accepted: true, id: message.id };
+      return { accepted: true, id: message.id, device: recipient.device_name ?? undefined };
     },
 
     startReceiving(onMessage) {
@@ -628,7 +635,7 @@ export const TARGET_SCHEMA = 1;
  * on a newer schema than this build supports (the entry then falls back).
  *
  * @param {import('pg').Pool} pool
- * @param {(msg: string) => void} log
+ * @param {import('../seams/log.mjs').Logger} log
  */
 export async function migrate(pool, log = () => {}) {
   const client = await pool.connect();
