@@ -294,11 +294,61 @@ changes (OCP):
   `extension/azure/` (the cross-machine path; password auth disabled server-side).
 - **Interceptor** (`seams/interceptor.mjs`) — middleware on send/receive and the wake
   prompt. The core ships **none**; this is where guardrails (authority, rate-limit,
-  loop/hop guards, content filters) go.
+  loop/hop guards, content filters) go. You can add interceptors **without editing this
+  repo** — drop in an external module via the plugin loader (see *External interceptors*
+  below).
 - **Sink** (`seams/sink.mjs`) — *which agent runtime a delivered message wakes.* Default:
   `sinks/copilot.mjs` (wakes a Copilot CLI session via `session.send()`). The core is **not** locked
   to interactive Copilot user-sessions — an **ACP-managed session** (or any runtime) is a drop-in
   `sinks/<runtime>.mjs` paired with a matching entry, with no core change.
+
+### External interceptors (plugins)
+
+Interceptors can be loaded from **your own modules** at startup — so a guardrail (or any
+middleware) lives in a separate, even **private**, repo or a local folder, never in this
+one. Two sources, loaded in order (env entries first, then the directory, alphabetically):
+
+| Source | How |
+|---|---|
+| **Env-var pointer** | `AGENT_RELAY_INTERCEPTORS` = a **comma-separated** list of module paths (**absolute recommended** — a session's cwd isn't obvious; relative is resolved against it), loaded in listed order. |
+| **Plugin directory** | every top-level `*.mjs` in `AGENT_RELAY_PLUGIN_DIR` (default `<data-dir>/plugins`, alongside the DB + logs, so it survives reinstalls). |
+
+**Contract** — a plugin module **default-exports a factory** (it may be `async`) that
+returns an interceptor (any subset of the seam's `onSend` / `onReceive` / `renderPrompt`):
+
+```js
+// my-interceptor.mjs
+export default function createInterceptor(ctx) {
+  // ctx = { env, dataDir, log }   — no `self`; identity isn't resolved yet.
+  //   env     — process.env (read your own config vars)
+  //   dataDir — the per-user data dir (string, or null) for any plugin state
+  //   log     — log(message[, { level: "warning" | "error" }]) → the diagnostic log
+  // ctx.log("my-guardrail ready");   // optional: announce yourself
+  return {
+    // Gate/transform inbound: call next(msg) to pass it on, or return WITHOUT
+    // calling next to drop it. (To reject a message, DROP it — don't throw.)
+    onReceive(message, next) { return next(message); },
+    // Optional: shape the wake prompt; return null to defer to the default.
+    renderPrompt(message) { return null; },
+    // Optional: onSend(message, next)
+  };
+}
+```
+
+- **Trusted, not sandboxed.** Loaded modules are **your own code** — only ever the modules
+  you point at via the env var / plugin dir. The loader fetches nothing and never loads
+  anything derived from message content.
+- **Load-time safe-degrade.** A plugin that fails to import, isn't a factory, or returns no
+  usable hook is **skipped and logged** — it never blocks startup. (A plugin that *hangs*
+  is out of scope; it's trusted code. Once loaded, a plugin's *runtime* hook behaviour
+  follows the Interceptor seam — to reject a message, **drop it, don't throw**.)
+- **Opt-in.** With no `AGENT_RELAY_INTERCEPTORS` paths **and** no `*.mjs` in the plugin
+  directory, nothing loads — behaviour is exactly as before.
+
+**Verify it loaded.** On startup each plugin logs `plugin loaded: <name>` (plus an
+`external interceptors active: <count>` summary) to the rolling diagnostic log at
+`<data-dir>/logs/agent-relay.log`; a rejected one logs `plugin skipped: <name> (<reason>)`.
+On Windows `<data-dir>` defaults to `%LOCALAPPDATA%\agent-relay` (see *Configuration*).
 
 ## License
 
