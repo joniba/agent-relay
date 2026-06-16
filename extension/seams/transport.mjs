@@ -68,6 +68,10 @@
  * @property {boolean} accepted        True if the transport accepted the message.
  * @property {string} [id]             The message id, when accepted.
  * @property {string} [error]          Human-readable reason when not accepted.
+ * @property {string} [device]         Recipient's device/host name, when the transport
+ *                                     resolved it — diagnostics only (e.g. logging the
+ *                                     target machine of a cross-machine send). A
+ *                                     single-machine transport MAY omit it.
  */
 
 /**

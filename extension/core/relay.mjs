@@ -37,6 +37,13 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
     }
   }
 
+  // Append "@<device>" only when the peer is on a DIFFERENT machine than us, so
+  // single-machine logs stay clean and cross-machine hops stand out. `self.deviceName`
+  // is this session's host (set by the entry); a peer device equal to it is same-machine.
+  function withDevice(name, device) {
+    return device && device !== self.deviceName ? `${name}@${device}` : name;
+  }
+
   /**
    * `send_message` tool handler. Plain in/out shape; the SDK adapter (bootstrap)
    * maps tool-call args to this and formats the result.
@@ -51,17 +58,27 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
       return { ok: false, error: "cannot send a message to yourself" };
     }
 
-    const message = createMessage({ from: self.name, to, body: content, inReplyTo });
+    const message = createMessage({
+      from: self.name,
+      to,
+      body: content,
+      inReplyTo,
+      // Stamp our own machine so the RECIPIENT can show the source machine on `recv`
+      // (cross-machine provenance via the opaque meta bag; absent single-machine).
+      meta: self.deviceName ? { fromDevice: self.deviceName } : undefined,
+    });
 
     const gated = await runChain(interceptors, "onSend", message);
     if (!gated) return { ok: false, error: "message blocked by an interceptor" };
 
+    const startedAt = performance.now();
     const result = await transport.send(gated);
+    const ms = Math.round(performance.now() - startedAt);
     if (!result || !result.accepted) {
       return { ok: false, error: (result && result.error) || "transport rejected the message" };
     }
     const id = result.id ?? gated.id;
-    note(`sent msg=${id} to=${to}`);
+    note(`sent msg=${id} to=${withDevice(to, result.device)} (${ms}ms)`);
     return { ok: true, id };
   }
 
@@ -70,7 +87,10 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
    * @returns {Promise<Array<import('../seams/identity.mjs').AgentIdentity & { self: boolean }>>}
    */
   async function listAgents() {
+    const startedAt = performance.now();
     const agents = await transport.listAgents();
+    const ms = Math.round(performance.now() - startedAt);
+    note(`list ${agents.length} agent(s) (${ms}ms)`);
     return agents.map((a) => ({ ...a, self: a.id === self.id }));
   }
 
@@ -106,7 +126,8 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
       }
       return;
     }
-    note(`recv msg=${message.id} from=${message.from}`);
+    const fromDevice = message.meta && message.meta.fromDevice;
+    note(`recv msg=${message.id} from=${withDevice(message.from, fromDevice)}`);
     // Wake failures propagate → the transport may redeliver.
     await sink.wake(prompt);
   }

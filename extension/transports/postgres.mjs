@@ -294,12 +294,15 @@ export function createPostgresTransport({
     async send(message) {
       // Exact id resolves a KNOWN agent even if offline/stale (durable delivery
       // to an away machine); a NAME resolves only a LIVE agent (never a freed
-      // alias), most-recently-heartbeating wins.
-      let recipient = (await pool.query("SELECT id FROM agents WHERE id = $1", [message.to])).rows[0];
+      // alias), most-recently-heartbeating wins. `device_name` is carried for
+      // diagnostics (logging the target machine of a cross-machine send).
+      let recipient = (
+        await pool.query("SELECT id, device_name FROM agents WHERE id = $1", [message.to])
+      ).rows[0];
       if (!recipient) {
         recipient = (
           await pool.query(
-            `SELECT id FROM agents
+            `SELECT id, device_name FROM agents
              WHERE name = $1 AND online AND last_heartbeat >= now() - make_interval(secs => $2)
              ORDER BY last_heartbeat DESC LIMIT 1`,
             [message.to, staleSecs],
@@ -325,7 +328,7 @@ export function createPostgresTransport({
           JSON.stringify(message.meta ?? {}),
         ],
       );
-      return { accepted: true, id: message.id };
+      return { accepted: true, id: message.id, device: recipient.device_name ?? undefined };
     },
 
     startReceiving(onMessage) {

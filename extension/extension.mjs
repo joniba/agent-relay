@@ -17,6 +17,7 @@ import { formatRoster } from "./roster.mjs";
 import { resolveDataDir } from "./storage/paths.mjs";
 import { aliasFor } from "./identity/local-alias.mjs";
 import { createRollingFileLog } from "./logging/rolling-file-log.mjs";
+import { createRelayLog } from "./logging/relay-log.mjs";
 
 // Load project-local config from a gitignored `.env` (if present) BEFORE anything
 // reads process.env — fills gaps only, so shell-exported vars still win. Lets the
@@ -166,18 +167,16 @@ if (dataDir) {
   }
 }
 
-// Route the relay's diagnostics through BOTH the session log (live timeline) and the
-// rolling file log (durable, tagged + levelled). Fire-and-forget, but never let a
-// logging failure escape as an unhandled rejection — these fire from background
-// poll/sweep timers too, outside any try/catch.
-const relayLog = (msg, opts) => {
-  try {
-    Promise.resolve(session.log?.(msg, opts)).catch(() => {});
-  } catch {
-    /* a logging failure must never disrupt the relay */
-  }
-  fileLog(msg, opts);
-};
+// Diagnostics are durable in the rolling FILE log; only a curated few also surface in
+// the live terminal (the "connected" line, startup connect warnings, and errors) so
+// the session isn't cluttered with technical detail — see createRelayLog. `booting`
+// gates the startup-warning window: warnings surface while booting, file-only after.
+let booting = true;
+const relayLog = createRelayLog({
+  sessionLog: (msg, opts) => session.log?.(msg, opts),
+  fileLog,
+  isBooting: () => booting,
+});
 
 // Surface which .env (if any) seeded the config — handy when diagnosing why a
 // session did or didn't join the cross-machine mesh.
@@ -220,7 +219,17 @@ try {
   self = started.self;
   transport = started.transport;
   ready = true;
-  relayLog(`agent-relay: registered as "${self.name}" on ${self.deviceName ?? "?"} — ready`);
+  // File-only registration detail (id/name/device) for the log; the human-facing
+  // confirmation is the single terminal line below.
+  relayLog(
+    `registered id=${String(self.id ?? "").slice(0, 8)} name=${self.name} device=${self.deviceName ?? "?"}`,
+  );
+  // The ONE line the user sees in the terminal on a successful join (🌐 = the
+  // agent-mesh heritage icon): replaces the old boot + "registered … ready" noise.
+  relayLog(
+    `🌐 agent-relay: connected to ${isCrossMachine ? "remote" : "local"} transport as [${self.name}]`,
+    { terminal: true },
+  );
   // If a teardown was requested while we were booting, honor it now.
   if (cleanedUp) {
     cleanedUp = false;
@@ -232,6 +241,9 @@ try {
     ? " — agent-relay is INACTIVE this session (not on any mesh). Fix connectivity and restart, or unset AGENT_RELAY_TRANSPORT to use the local single-machine mesh."
     : "";
   relayLog(`agent-relay failed to start: ${err.message}${suggestion}`, { level: "error" });
+} finally {
+  // Startup window closed: from here on, only errors (not warnings) surface inline.
+  booting = false;
 }
 
 // Best-effort cleanup if the host tears us down without onSessionEnd. Use `once`
