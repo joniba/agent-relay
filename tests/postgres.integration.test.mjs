@@ -338,6 +338,78 @@ test("a stale session that resumes re-registers (no resurrected duplicate alias)
   await b.stop();
 });
 
+// ── push (LISTEN/NOTIFY) ─────────────────────────────────────────────────────
+
+test("push: a NOTIFY delivers well under the poll interval", { skip }, async () => {
+  // Poll deliberately slow (5s) so a sub-500ms wake can ONLY be push, not poll.
+  const sender = makeTransport({ pollIntervalMs: 5000 });
+  const receiver = makeTransport({ pollIntervalMs: 5000 });
+  await sender.init(ctx("ps", "sender"));
+  await receiver.init(ctx("pr", "receiver"));
+  await sender.register(ident("ps", "sender"));
+  await receiver.register(ident("pr", "receiver"));
+
+  const woke = [];
+  receiver.startReceiving(async (m) => woke.push({ m, at: Date.now() }));
+  await wait(300); // let the dedicated LISTEN client connect
+
+  const t0 = Date.now();
+  await sender.send(createMessage({ from: "sender", to: "receiver", body: "push-fast" }));
+  for (let i = 0; i < 50 && woke.length === 0; i++) await wait(20);
+
+  assert.equal(woke.length, 1, "delivered");
+  const latency = woke[0].at - t0;
+  assert.ok(latency < 500, `push latency ${latency}ms should be < 500ms (poll is 5000ms)`);
+  await sender.stop();
+  await receiver.stop();
+});
+
+test("push disabled: the poll still delivers (safety-net path)", { skip }, async () => {
+  const sender = makeTransport({ pushEnabled: false, pollIntervalMs: 200 });
+  const receiver = makeTransport({ pushEnabled: false, pollIntervalMs: 200 });
+  await sender.init(ctx("nps", "sender"));
+  await receiver.init(ctx("npr", "receiver"));
+  await sender.register(ident("nps", "sender"));
+  await receiver.register(ident("npr", "receiver"));
+
+  const woke = [];
+  receiver.startReceiving(async (m) => woke.push(m));
+  await sender.send(createMessage({ from: "sender", to: "receiver", body: "poll-only" }));
+  await wait(800);
+
+  assert.equal(woke.length, 1, "poll delivered with push disabled");
+  await sender.stop();
+  await receiver.stop();
+});
+
+test("push: gap-heal drains a message that arrived before the listener connected", {
+  skip,
+}, async () => {
+  // The message is sent while the receiver has NO listener: its NOTIFY is lost (it
+  // does not queue for absent listeners) but the row is durable. When the receiver
+  // starts, the gap-heal drain on (re)connect must pick it up — well under the 5s
+  // poll — which is exactly the reconnect-recovery path.
+  const sender = makeTransport({ pollIntervalMs: 5000 });
+  const receiver = makeTransport({ pollIntervalMs: 5000 });
+  await sender.init(ctx("gs", "sender"));
+  await receiver.init(ctx("gr", "receiver"));
+  await sender.register(ident("gs", "sender"));
+  await receiver.register(ident("gr", "receiver"));
+
+  await sender.send(createMessage({ from: "sender", to: "receiver", body: "pre-listen" }));
+
+  const woke = [];
+  const t0 = Date.now();
+  receiver.startReceiving(async (m) => woke.push({ m, at: Date.now() }));
+  for (let i = 0; i < 100 && woke.length === 0; i++) await wait(20);
+
+  assert.equal(woke.length, 1, "gap-heal delivered the pre-listener message");
+  const latency = woke[0].at - t0;
+  assert.ok(latency < 1500, `gap-heal latency ${latency}ms < 1500ms (poll is 5000ms)`);
+  await sender.stop();
+  await receiver.stop();
+});
+
 // ── sweep / retention ────────────────────────────────────────────────────────
 
 test("sweep deletes old messages + long-stale agents, keeps fresh ones", { skip }, async () => {

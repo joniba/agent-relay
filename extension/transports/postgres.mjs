@@ -66,8 +66,13 @@ export function createPostgresTransport({
   sweepIntervalMs = 1_200_000,
   messageTtlMs = 86_400_000,
   agentRetentionMs = 604_800_000,
+  pushEnabled = true,
+  listenBackoffMinMs = 1000,
+  listenBackoffMaxMs = 30000,
+  listenRecycleMs = 2_400_000,
   log = () => {},
   debug = false,
+  _pg = null,
 } = {}) {
   if (!host) throw new Error("postgres transport requires a host");
   if (!user) throw new Error("postgres transport requires a user");
@@ -91,7 +96,43 @@ export function createPostgresTransport({
   let draining = false;
   let stopped = false;
   let deregistered = false;
-  let lastHeartbeat = 0;
+  /** @type {ReturnType<typeof setInterval> | null} */
+  let heartbeatTimer = null;
+  // ── push (LISTEN/NOTIFY) state — see startListener/dropListener below ──
+  /** Set when a NOTIFY lands mid-drain; triggers one more bounded drain pass. */
+  let rescan = false;
+  /** Credentials seam captured in init(), reused for the dedicated listen client. */
+  let credentials;
+  /** @type {import('pg').Client | null} Dedicated long-lived LISTEN connection. */
+  let listenClient = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let listenReconnectTimer = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let listenRecycleTimer = null;
+  /** Bumped on every (re)connect so a stale client's callbacks no-op (single-flight). */
+  let listenGen = 0;
+  let listenBackoffMs = listenBackoffMinMs;
+
+  /**
+   * Connection options for the dedicated LISTEN client (mirrors the pool's auth).
+   * `keepAlive` helps surface a silently dropped listen socket; the password
+   * callback mints a fresh credential per new connection (Azure token / env).
+   */
+  function connectionOptions() {
+    return {
+      host,
+      user,
+      database,
+      port,
+      ssl,
+      password: async () => (await credentials.get()) ?? undefined,
+      keepAlive: true,
+      // Own connect timeout: the listen client is OUTSIDE the pool, so it does NOT
+      // inherit the pool's connectionTimeoutMillis. Bound a hung connect so the
+      // reconnect/backoff path can take over.
+      connectionTimeoutMillis: 30000,
+    };
+  }
 
   // ── alias collision resolution (advisory-locked, cross-machine atomic) ──────
   async function register(identity) {
@@ -217,12 +258,13 @@ export function createPostgresTransport({
   return {
     async init(ctx) {
       self = ctx.self;
+      credentials = ctx.credentials; // captured for the dedicated LISTEN client (push)
       // Load `pg` on demand. If it isn't installed, this is the cross-machine
       // opt-in path without its dependency — surface a clear, actionable error
       // (the entry then falls back to the local SQLite transport).
       if (!pg) {
         try {
-          pg = (await import("pg")).default;
+          pg = _pg ?? (await import("pg")).default;
         } catch (err) {
           throw new Error(
             "the 'postgres' transport requires the 'pg' package — run `npm install` " +
@@ -321,91 +363,196 @@ export function createPostgresTransport({
           JSON.stringify(message.meta ?? {}),
         ],
       );
+      // Best-effort INSTANT wake: fire-and-forget so it can never delay or fail an
+      // already-durable send (an awaited notify could block on pool-checkout/network
+      // after the row is committed). If this NOTIFY is lost, the receiver's poll is
+      // the durable safety-net. The INSERT autocommits BEFORE this runs, so any
+      // listener woken by the NOTIFY is guaranteed to see the row.
+      if (pushEnabled) {
+        // Fire-and-forget: the message is already durable, so a notify failure never
+        // loses it (the poll delivers it). Swallow to avoid an unhandled rejection.
+        void pool.query("SELECT pg_notify($1, $2)", [PUSH_CHANNEL, recipient.id]).catch(() => {});
+      }
       return { accepted: true, id: message.id };
     },
 
     startReceiving(onMessage) {
+      // One claim/wake pass: claim up to maxPerPoll pending rows for this session
+      // (atomic, leased — no cross-machine double wake), wake each outside the
+      // claiming statement, then DELETE on success / retry → dead-letter on failure.
+      // Returns how many rows were claimed.
+      const drainPass = async () => {
+        const claimed = (
+          await pool.query(
+            `UPDATE messages SET lease_until = now() + make_interval(secs => $3)
+             WHERE id IN (
+               SELECT id FROM messages
+               WHERE recipient_id = $1 AND status = 'pending'
+                 AND (lease_until IS NULL OR lease_until < now())
+               ORDER BY seq LIMIT $2
+               FOR UPDATE SKIP LOCKED
+             )
+             RETURNING *`,
+            [self.id, maxPerPoll, leaseSecs],
+          )
+        ).rows;
+
+        for (const row of claimed) {
+          if (stopped) break;
+          let handled = false;
+          try {
+            await onMessage(toMessage(row));
+            handled = true;
+          } catch {
+            handled = false; // wake failed → bounded retry below
+          }
+          if (stopped) break;
+          try {
+            if (handled) {
+              await pool.query("DELETE FROM messages WHERE id = $1", [row.id]);
+            } else {
+              const attempts = row.attempts + 1;
+              if (attempts >= maxAttempts) {
+                await pool.query(
+                  "UPDATE messages SET status = 'dead', attempts = $1, lease_until = NULL WHERE id = $2",
+                  [attempts, row.id],
+                );
+                log(`postgres: message ${row.id} dead-lettered after ${attempts} attempt(s)`);
+              } else {
+                await pool.query(
+                  "UPDATE messages SET attempts = $1, lease_until = NULL WHERE id = $2",
+                  [attempts, row.id],
+                );
+              }
+            }
+          } catch {
+            // DB hiccup — leave the row (lease expires → retried). At-least-once.
+          }
+        }
+        return claimed.length;
+      };
+
+      // The SINGLE claim-and-wake routine, shared by BOTH the poll timer and the
+      // push listener. `draining` serializes the two paths in-process (they never
+      // overlap); a NOTIFY that lands mid-drain sets `rescan`, so we do one more
+      // bounded pass rather than wait for the next (relaxed) poll. Each PASS claims
+      // <= maxPerPoll; the loop runs at most MAX_DRAIN_PASSES passes (only while
+      // NOTIFYs keep arriving mid-drain), so one drain delivers at most
+      // MAX_DRAIN_PASSES*maxPerPoll rows before yielding — we never loop on a full
+      // batch (no unbounded backlog drain).
       const drain = async () => {
         if (draining || stopped) return;
         draining = true;
         try {
-          if (stopped) return;
-
-          // Heartbeat on its own (slower) cadence, WITHOUT resurrecting a stale
-          // row: if we already aged out (e.g. the machine slept and our alias may
-          // have been reassigned), re-register to re-acquire an alias.
-          const now = Date.now();
-          if (now - lastHeartbeat >= heartbeatIntervalMs) {
-            lastHeartbeat = now;
-            const hb = await pool.query(
-              `UPDATE agents SET last_heartbeat = now()
-               WHERE id = $1 AND online AND last_heartbeat >= now() - make_interval(secs => $2)`,
-              [self.id, staleSecs],
-            );
-            if (hb.rowCount === 0 && !stopped && !deregistered) await register(self);
-          }
-          if (stopped) return;
-
-          // Claim pending rows atomically (no overlapping/cross-machine double
-          // wake) with a short lease, then wake outside the claiming statement.
-          const claimed = (
-            await pool.query(
-              `UPDATE messages SET lease_until = now() + make_interval(secs => $3)
-               WHERE id IN (
-                 SELECT id FROM messages
-                 WHERE recipient_id = $1 AND status = 'pending'
-                   AND (lease_until IS NULL OR lease_until < now())
-                 ORDER BY seq LIMIT $2
-                 FOR UPDATE SKIP LOCKED
-               )
-               RETURNING *`,
-              [self.id, maxPerPoll, leaseSecs],
-            )
-          ).rows;
-
-          for (const row of claimed) {
+          let passes = 0;
+          do {
+            rescan = false;
             if (stopped) break;
-            let handled = false;
-            try {
-              await onMessage(toMessage(row));
-              handled = true;
-            } catch {
-              handled = false; // wake failed → bounded retry below
-            }
-            if (stopped) break;
-            try {
-              if (handled) {
-                await pool.query("DELETE FROM messages WHERE id = $1", [row.id]);
-              } else {
-                const attempts = row.attempts + 1;
-                if (attempts >= maxAttempts) {
-                  await pool.query(
-                    "UPDATE messages SET status = 'dead', attempts = $1, lease_until = NULL WHERE id = $2",
-                    [attempts, row.id],
-                  );
-                  log(`postgres: message ${row.id} dead-lettered after ${attempts} attempt(s)`);
-                } else {
-                  await pool.query(
-                    "UPDATE messages SET attempts = $1, lease_until = NULL WHERE id = $2",
-                    [attempts, row.id],
-                  );
-                }
-              }
-            } catch {
-              // DB hiccup — leave the row (lease expires → retried). At-least-once.
-            }
-          }
+            await drainPass();
+          } while (rescan && !stopped && ++passes < MAX_DRAIN_PASSES);
         } catch {
           // A cycle hit a transient error — swallow; the transport must survive a
-          // cycle (the poll naturally retries).
+          // cycle (poll/notify naturally retry).
         } finally {
           draining = false;
         }
       };
 
+      // Presence heartbeat on its OWN timer, decoupled from poll so relaxing the poll
+      // cadence never degrades liveness. NON-RESURRECTING: the UPDATE only matches a
+      // still-online, non-stale row; if we already aged out (machine slept, alias maybe
+      // reassigned) it matches 0 rows and we re-register instead of being silently
+      // resurrected. Guards on `stopped` so no beat escapes after stop() (ghost session).
+      const heartbeat = async () => {
+        if (stopped) return;
+        try {
+          const hb = await pool.query(
+            `UPDATE agents SET last_heartbeat = now()
+             WHERE id = $1 AND online AND last_heartbeat >= now() - make_interval(secs => $2)`,
+            [self.id, staleSecs],
+          );
+          if (hb.rowCount === 0 && !stopped && !deregistered) await register(self);
+        } catch {
+          // transient — the next heartbeat tick retries.
+        }
+      };
+
+      // ── push: dedicated LISTEN client with single-flight reconnect + recycle ────
+      // Only the addressed session reacts; a NOTIFY mid-drain folds into the in-flight
+      // drain via `rescan` instead of overlapping.
+      const onNotification = (gen, msg) => {
+        if (stopped || gen !== listenGen) return; // stale client
+        if (msg.payload !== self.id) return; // not addressed to us
+        if (draining) rescan = true;
+        else void drain();
+      };
+
+      // Tear down the current listen client and schedule a reconnect. Bumps listenGen
+      // so any FURTHER event from the dead client (pg can fire BOTH `error` and `end`)
+      // no-ops — single-flight.
+      const dropListener = (gen) => {
+        if (stopped || gen !== listenGen) return;
+        listenGen++; // invalidate this client's remaining callbacks
+        const client = listenClient;
+        listenClient = null;
+        if (listenRecycleTimer) {
+          clearTimeout(listenRecycleTimer);
+          listenRecycleTimer = null;
+        }
+        if (client) {
+          try {
+            client.removeAllListeners();
+          } catch {
+            /* ignore */
+          }
+          client.end().catch(() => {});
+        }
+        scheduleReconnect();
+      };
+
+      const scheduleReconnect = () => {
+        if (stopped || listenReconnectTimer) return; // single-flight
+        const delay = listenBackoffMs;
+        listenBackoffMs = Math.min(listenBackoffMs * 2, listenBackoffMaxMs);
+        listenReconnectTimer = setTimeout(() => {
+          listenReconnectTimer = null;
+          if (!stopped) startListener();
+        }, delay);
+        if (typeof listenReconnectTimer.unref === "function") listenReconnectTimer.unref();
+      };
+
+      const startListener = () => {
+        if (!pushEnabled || stopped) return;
+        const gen = ++listenGen;
+        const client = new pg.Client(connectionOptions());
+        listenClient = client;
+        client.on("error", () => dropListener(gen));
+        client.on("end", () => dropListener(gen));
+        client.on("notification", (msg) => onNotification(gen, msg));
+        client
+          .connect()
+          .then(() => client.query(LISTEN_SQL))
+          .then(() => {
+            if (stopped || gen !== listenGen) {
+              client.end().catch(() => {});
+              return;
+            }
+            listenBackoffMs = listenBackoffMinMs; // reset backoff on a clean connect
+            // Proactive recycle before the credential/token lifetime, so a silent
+            // half-drop is refreshed rather than only discovered on next use.
+            listenRecycleTimer = setTimeout(() => dropListener(gen), listenRecycleMs);
+            if (typeof listenRecycleTimer.unref === "function") listenRecycleTimer.unref();
+            void drain(); // gap-heal: catch anything sent while we had no listener
+          })
+          .catch(() => dropListener(gen));
+      };
+
       timer = setInterval(() => void drain(), pollIntervalMs);
       if (typeof timer.unref === "function") timer.unref();
+      heartbeatTimer = setInterval(() => void heartbeat(), heartbeatIntervalMs);
+      if (typeof heartbeatTimer.unref === "function") heartbeatTimer.unref();
       scheduleSweep();
+      startListener();
     },
 
     sweep,
@@ -416,9 +563,35 @@ export function createPostgresTransport({
         clearInterval(timer);
         timer = null;
       }
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
       if (sweepTimer) {
         clearTimeout(sweepTimer);
         sweepTimer = null;
+      }
+      if (listenReconnectTimer) {
+        clearTimeout(listenReconnectTimer);
+        listenReconnectTimer = null;
+      }
+      if (listenRecycleTimer) {
+        clearTimeout(listenRecycleTimer);
+        listenRecycleTimer = null;
+      }
+      if (listenClient) {
+        const client = listenClient;
+        listenClient = null;
+        try {
+          client.removeAllListeners();
+        } catch {
+          /* ignore */
+        }
+        try {
+          await client.end();
+        } catch {
+          /* already ended */
+        }
       }
       while (draining) await new Promise((r) => setTimeout(r, 5));
       if (pool) {
@@ -437,6 +610,14 @@ export function createPostgresTransport({
 const MIGRATE_LOCK_KEY = 498061001;
 const ALIAS_LOCK_KEY = 498061002;
 const SWEEP_LOCK_KEY = 498061003;
+
+// Push (LISTEN/NOTIFY): one shared channel; each listener filters by payload === self.id.
+const PUSH_CHANNEL = "agent_relay_msg";
+const LISTEN_SQL = `LISTEN "${PUSH_CHANNEL}"`;
+// Max claim/wake passes per drain() — one normal pass plus up to ~2 rescan re-arms
+// when NOTIFYs land mid-drain. Bounds the loop; any remainder rides poll/next-NOTIFY.
+// We do NOT bulk-drain a backlog (per-drain cap = maxPerPoll, by design).
+const MAX_DRAIN_PASSES = 3;
 
 /** The schema version this transport build expects. */
 export const TARGET_SCHEMA = 1;
