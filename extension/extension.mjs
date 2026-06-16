@@ -18,6 +18,7 @@ import { resolveDataDir } from "./storage/paths.mjs";
 import { aliasFor } from "./identity/local-alias.mjs";
 import { createRollingFileLog } from "./logging/rolling-file-log.mjs";
 import { createRelayLog } from "./logging/relay-log.mjs";
+import { loadExternalInterceptors } from "./plugins/loader.mjs";
 
 // Load project-local config from a gitignored `.env` (if present) BEFORE anything
 // reads process.env — fills gaps only, so shell-exported vars still win. Lets the
@@ -206,12 +207,22 @@ relayLog(
     ` datadir=${dataDir ?? "?"}`,
 );
 
+// Load EXTERNAL interceptors (guardrails/middleware) from the plugin dir + env-var
+// pointer, to compose into the chain. Loaded ONCE here (async) and reused on every
+// retry attempt. Safe-degrade: a broken plugin is skipped + logged, never blocks
+// startup. Plugins are trusted user code — this is not a sandbox.
+const externalInterceptors = await loadExternalInterceptors({
+  env: process.env,
+  dataDir,
+  log: relayLog,
+});
+
 try {
   // All substrate composition lives in config.mjs; the entry only supplies the
   // session + log + retry policy and performs the boot via the testable bootstrap.
   const started = await startRelaySession({
     session,
-    createConfig: () => createConfig({ log: relayLog }),
+    createConfig: () => createConfig({ log: relayLog, interceptors: externalInterceptors }),
     retry,
     log: relayLog,
   });

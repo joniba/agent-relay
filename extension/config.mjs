@@ -14,8 +14,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Composition root — the SINGLE place adapters are chosen (OCP). To use a
- * different transport, identity scheme, credential source, or to add
- * interceptors (guardrails), edit ONLY this function.
+ * different transport, identity scheme, or credential source, edit ONLY this
+ * function. Interceptors (guardrails/middleware) are NOT baked in here — the entry
+ * loads EXTERNAL interceptor modules (see `plugins/loader.mjs`) and passes them in
+ * via `interceptors`, so a private guardrail need not live in this repo.
  *
  * Substrate selection:
  *   - `AGENT_RELAY_TRANSPORT=postgres` → the cross-machine Postgres transport
@@ -37,6 +39,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * @param {import('./seams/log.mjs').Logger} [opts.log]
  *   Diagnostic logger handed to transports that emit observability events
  *   (pool errors, dead-letter, sweep). Defaults to a no-op.
+ * @param {import('./seams/interceptor.mjs').Interceptor[]} [opts.interceptors]
+ *   External interceptors (loaded by the entry from the plugin dir / env-var) to
+ *   compose into the chain. Defaults to none.
  * @returns {{
  *   identity: import('./seams/identity.mjs').IdentityProvider,
  *   credentials: import('./seams/credentials.mjs').CredentialProvider,
@@ -44,7 +49,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *   interceptors: import('./seams/interceptor.mjs').Interceptor[],
  * }}
  */
-export function createConfig({ log = () => {} } = {}) {
+export function createConfig({ log = () => {}, interceptors = [] } = {}) {
   if (process.env.AGENT_RELAY_TRANSPORT === "postgres") {
     const credentials = process.env.AGENT_RELAY_PG_PASSWORD
       ? createEnvPasswordCredentials()
@@ -63,13 +68,13 @@ export function createConfig({ log = () => {} } = {}) {
         debug: /^(1|true|yes|on)$/i.test(process.env.AGENT_RELAY_DEBUG ?? ""),
         log,
       }),
-      interceptors: [],
+      interceptors,
     };
   }
 
   return {
     identity: createLocalAliasIdentity(),
-    interceptors: [],
+    interceptors,
     ...localSlice(),
   };
 }
