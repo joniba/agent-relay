@@ -10,8 +10,12 @@ import { randomUUID } from "node:crypto";
  * `meta` is an OPAQUE, transport-preserved key/value bag for cross-cutting
  * concerns that must NOT bloat the core: interceptors may read/write it (hop
  * counts, trust/authority labels, priorities, correlation ids, …) and a
- * conformant transport carries it through untouched. The core never interprets
- * `meta` — this is the OCP escape hatch so future guardrails need no core change.
+ * conformant transport carries it through untouched. The core never lets `meta`
+ * change ROUTING or delivery BEHAVIOR — this is the OCP escape hatch so future
+ * guardrails need no core change. (The core does stamp + read ONE diagnostic
+ * provenance key — `meta.fromDevice`, the sender's machine — for observability
+ * only, e.g. showing the source machine in a `recv` log line; it never affects
+ * delivery.)
  *
  * @typedef {object} Message
  * @property {string} id          Unique message id.

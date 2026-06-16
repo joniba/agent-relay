@@ -35,6 +35,7 @@ class FakeTransport {
     this._onMessage = null;
     this.stopped = false;
     this.sendResult = null; // override to force an error result
+    this.sendDevice = undefined; // recipient device the transport "resolved"
   }
   async init() {}
   async register(self) {
@@ -48,7 +49,7 @@ class FakeTransport {
   }
   async send(message) {
     this.sent.push(message);
-    return this.sendResult ?? { accepted: true, id: message.id };
+    return this.sendResult ?? { accepted: true, id: message.id, device: this.sendDevice };
   }
   startReceiving(onMessage) {
     this._onMessage = onMessage;
@@ -98,6 +99,44 @@ test("sendMessage routes through transport and returns ok+id", async () => {
   assert.equal(res.id, transport.sent[0].id);
 });
 
+test("sendMessage notes a 'sent' line (id + target machine + duration, no body) via sink.log", async () => {
+  const { relay, sink, transport } = makeRelay();
+  transport.sendDevice = "CPC-box";
+  const res = await relay.sendMessage({ to: "bob", content: "secret payload" });
+  const line = sink.logs.find((l) => /^sent /.test(l.message));
+  assert.ok(line, "a 'sent' observability line was logged");
+  // SELF has no deviceName, so a peer device always differs → @machine is shown; plus roundtrip ms.
+  assert.match(line.message, new RegExp(`sent msg=${res.id} to=bob@CPC-box \\(\\d+ms\\)`));
+  assert.doesNotMatch(line.message, /secret payload/, "the message body is never logged");
+});
+
+test("sent line omits @device when the recipient is on this same machine", async () => {
+  const sink = new FakeSink();
+  const transport = new FakeTransport();
+  transport.sendDevice = "boxA";
+  const relay = createRelay({ sink, self: { id: "s", name: "alice", deviceName: "boxA" }, transport });
+  await relay.sendMessage({ to: "bob", content: "hi" });
+  const line = sink.logs.find((l) => /^sent /.test(l.message));
+  assert.match(line.message, /to=bob \(\d+ms\)/, "no @device for a same-machine peer");
+});
+
+test("sendMessage stamps the sender's device into meta for recipient-side provenance", async () => {
+  const sink = new FakeSink();
+  const transport = new FakeTransport();
+  const relay = createRelay({ sink, self: { id: "s", name: "alice", deviceName: "boxA" }, transport });
+  await relay.sendMessage({ to: "bob", content: "hi" });
+  assert.equal(transport.sent[0].meta.fromDevice, "boxA");
+});
+
+test("a failing sink.log never breaks send (observability is fire-and-forget)", async () => {
+  const sink = new FakeSink();
+  sink.failLog = true;
+  const transport = new FakeTransport();
+  const relay = createRelay({ sink, self: SELF, transport, interceptors: [] });
+  const res = await relay.sendMessage({ to: "bob", content: "x" });
+  assert.equal(res.ok, true, "send still succeeds even though sink.log throws");
+});
+
 test("sendMessage rejects self-send by name and by id", async () => {
   const { relay, transport } = makeRelay();
   const byName = await relay.sendMessage({ to: "alice", content: "x" });
@@ -133,6 +172,39 @@ test("inbound message wakes the agent with the default prompt", async () => {
   assert.equal(sink.wakes.length, 1);
   assert.match(sink.wakes[0], /bob/);
   assert.match(sink.wakes[0], /hello there/);
+});
+
+test("inbound delivery notes a 'recv' line (id + sender, no body) via sink.log", async () => {
+  const { relay, sink, transport } = makeRelay();
+  relay.start();
+  const msg = createMessage({ from: "bob", to: "alice", body: "hello there" });
+  await transport.deliver(msg);
+  const line = sink.logs.find((l) => /^recv /.test(l.message));
+  assert.ok(line, "a 'recv' observability line was logged");
+  assert.match(line.message, new RegExp(`recv msg=${msg.id} from=bob`));
+  assert.doesNotMatch(line.message, /hello there/, "the message body is never logged");
+});
+
+test("recv line shows the source machine (from meta) for a cross-machine sender", async () => {
+  const sink = new FakeSink();
+  const transport = new FakeTransport();
+  const relay = createRelay({ sink, self: { id: "s", name: "alice", deviceName: "boxA" }, transport });
+  relay.start();
+  const msg = createMessage({ from: "bob", to: "alice", body: "x", meta: { fromDevice: "boxB" } });
+  await transport.deliver(msg);
+  const line = sink.logs.find((l) => /^recv /.test(l.message));
+  assert.match(line.message, new RegExp(`recv msg=${msg.id} from=bob@boxB`));
+});
+
+test("recv line omits @device when the sender is on this same machine", async () => {
+  const sink = new FakeSink();
+  const transport = new FakeTransport();
+  const relay = createRelay({ sink, self: { id: "s", name: "alice", deviceName: "boxA" }, transport });
+  relay.start();
+  const msg = createMessage({ from: "bob", to: "alice", body: "x", meta: { fromDevice: "boxA" } });
+  await transport.deliver(msg);
+  const line = sink.logs.find((l) => /^recv /.test(l.message));
+  assert.match(line.message, /from=bob$/, "no @device for a same-machine sender");
 });
 
 // ─── interceptors ────────────────────────────────────────────────
@@ -234,6 +306,16 @@ test("listAgents proxies the transport and flags self", async () => {
   assert.equal(agents.length, 2);
   assert.equal(agents.find((a) => a.name === "alice").self, true);
   assert.equal(agents.find((a) => a.name === "bob").self, false);
+});
+
+test("listAgents notes a 'list' line with the agent count + duration via sink.log", async () => {
+  const { relay, sink, transport } = makeRelay();
+  await transport.register({ id: "a", name: "x" });
+  await transport.register({ id: "b", name: "y" });
+  await relay.listAgents();
+  const line = sink.logs.find((l) => /^list /.test(l.message));
+  assert.ok(line, "a 'list' observability line was logged");
+  assert.match(line.message, /list 2 agent\(s\) \(\d+ms\)/);
 });
 
 // ─── lifecycle ───────────────────────────────────────────────────

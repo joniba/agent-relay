@@ -9,11 +9,17 @@
  * not in the core.
  *
  * @param {import('../seams/identity.mjs').SessionLike} session
+ * @param {import('../seams/log.mjs').Logger} [log]  Diagnostic logger for the core's
+ *   observability (send/receive/poison). Defaults to `session.log`; the entry injects
+ *   its tee'd logger here so the core's lines also reach the rolling file log.
  * @returns {import('../seams/sink.mjs').Sink}
  */
-export function createCopilotSink(session) {
-  return {
+export function createCopilotSink(session, log) {
+  const logFn =
+    log ?? (typeof session.log === "function" ? (m, o) => session.log(m, o) : undefined);
+  const sink = {
     wake: (prompt) => session.send({ prompt, mode: "immediate" }),
-    log: typeof session.log === "function" ? (m, o) => session.log(m, o) : undefined,
   };
+  if (logFn) sink.log = logFn;
+  return sink;
 }

@@ -24,3 +24,17 @@ test("copilot sink delegates log when present, omits it when absent", async () =
   const noLog = createCopilotSink({ sessionId: "s", async send() {} });
   assert.equal(noLog.log, undefined); // optional — omitted when the runtime has none
 });
+
+test("an injected log overrides session.log (so the core's lines reach the file log)", async () => {
+  const sessionLogs = [];
+  const injected = [];
+  const session = {
+    sessionId: "s",
+    async send() {},
+    async log(m) { sessionLogs.push(m); },
+  };
+  const sink = createCopilotSink(session, (m, o) => injected.push({ m, o }));
+  await sink.log("recv msg=1 from=bob", { level: undefined });
+  assert.deepEqual(injected, [{ m: "recv msg=1 from=bob", o: { level: undefined } }]);
+  assert.equal(sessionLogs.length, 0, "session.log is NOT used when a log is injected");
+});

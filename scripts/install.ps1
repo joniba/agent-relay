@@ -154,14 +154,17 @@ if ($isCrossMachine) {
 }
 
 # --- Install: self-contained COPY (default) or a dev JUNCTION (-Link) --------
-# A copy bundles extension/ + node_modules so the destination is self-contained
-# and never depends on this clone staying put. Re-running to upgrade refreshes
-# the code in place and PRESERVES runtime state (*.db*) — which is never even
-# opened — so an upgrade is safe while a session holds the SQLite DB open. -Link
-# instead points the destination at this clone (contributors: `git pull` updates
-# the live extension with no re-copy).
+# A copy bundles extension/ + node_modules so the destination is self-contained and
+# never depends on this clone staying put. Re-running to upgrade refreshes the code
+# in place. Runtime state (the SQLite store + logs) now lives in the per-user DATA
+# DIR, OUTSIDE this folder, so an upgrade doesn't touch it. We still PRESERVE any
+# in-install `*.db*` here (a legacy pre-data-dir store, or an AGENT_RELAY_DB that
+# points inside the install) so it survives until it's migrated into the data dir —
+# which keeps an upgrade safe even while an older session holds that legacy DB open.
+# -Link instead points the destination at this clone (contributors: `git pull`
+# updates the live extension with no re-copy).
 
-$dbGlob = '*.db*'   # agent-relay.db + its -wal/-shm sidecars: runtime state, keep
+$dbGlob = '*.db*'   # legacy/in-install SQLite store + sidecars: preserve until migrated
 
 if ($Link) {
     # Dev junction. Needs a removable destination; a copy whose DB is held open by
