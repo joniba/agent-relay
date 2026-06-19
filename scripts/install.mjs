@@ -25,6 +25,10 @@ import { homedir } from "node:os";
 
 const argv = process.argv.slice(2);
 const NO_STATUSLINE = argv.includes("--no-statusline");
+// Suppress the trailing "Next steps" narrative — used when a WRAPPER installer (e.g. the
+// agent-relay-pg-plugin installer) drives core, so the user sees one coherent set of next
+// steps from the wrapper, not core's local-transport message contradicting it.
+const QUIET = argv.includes("--quiet");
 
 const GREEN = "\x1b[32m", YELLOW = "\x1b[33m", CYAN = "\x1b[36m", DIM = "\x1b[90m", RESET = "\x1b[0m";
 const ok = (m) => console.log(`${GREEN}${m}${RESET}`);
@@ -142,10 +146,11 @@ if (!NO_STATUSLINE) {
 }
 
 // --- Next steps --------------------------------------------------------------
-const nameHint = process.platform === "win32"
-  ? `$env:AGENT_RELAY_NAME = "tia"   # PowerShell  (cmd.exe: set AGENT_RELAY_NAME=tia)`
-  : `export AGENT_RELAY_NAME=tia`;
-info(`
+if (!QUIET) {
+  const nameHint = process.platform === "win32"
+    ? `$env:AGENT_RELAY_NAME = "tia"   # PowerShell  (cmd.exe: set AGENT_RELAY_NAME=tia)`
+    : `export AGENT_RELAY_NAME=tia`;
+  info(`
 Next steps (this script does NOT launch Copilot):
   1. (optional) name this session in the mesh:  ${nameHint}
   2. start with extensions enabled:             copilot --experimental
@@ -155,3 +160,4 @@ On load you'll see: \ud83c\udf10 agent-relay: connected to local transport as [<
 }
 
 Cross-machine messaging is a separate plugin: npx --yes github:joniba/agent-relay-pg-plugin`);
+}
