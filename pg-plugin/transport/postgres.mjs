@@ -1,8 +1,13 @@
-// `pg` is loaded LAZILY inside init() (see below), NOT at module top — so the
-// extension's default single-machine path (built-in node:sqlite) needs ZERO
-// external packages installed. The `pg` dependency matters only when a session
-// actually opts into the cross-machine Postgres transport. Mirrors how the Azure
-// credential lazily imports @azure/identity.
+// `pg` is loaded LAZILY inside init() (see below), NOT at module top — so this
+// plugin's `node_modules` is touched only when a session actually opts into the
+// cross-machine Postgres transport. Mirrors how the Azure credential lazily
+// imports @azure/identity.
+//
+// This module is SELF-CONTAINED: it depends only on `pg` and the (duck-typed)
+// Credentials seam passed via ctx.credentials. It imports NOTHING from agent-relay
+// core — the seam contracts referenced in JSDoc below are documentation only.
+
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Cross-machine Transport: a shared PostgreSQL store + interval poll. The
@@ -15,7 +20,7 @@
  * Azure-specific credential is supplied via `ctx.credentials` (see the `azure/`
  * lib); nothing Azure appears here.
  *
- * Honors {@link import('../seams/transport.mjs').Transport}:
+ * Honors {@link Transport}:
  *   - `register` resolves alias collisions **atomically across machines** under a
  *     Postgres advisory lock (the cross-machine analogue of SQLite's
  *     `BEGIN IMMEDIATE`), and marks the row `online`.
@@ -34,6 +39,12 @@
  * @param {number} [opts.port]                 Default 5432.
  * @param {number} [opts.connectionTimeoutMillis] Per-connection acquire timeout so a
  *   blocked/slow connect fails fast instead of hanging boot (default 30000).
+ * @param {number} [opts.connectMaxAttempts]    How many times init() retries the
+ *   initial connect before giving up (default 3). A deterministic schema-version
+ *   error is never retried.
+ * @param {number[]} [opts.connectBackoffsMs]   Backoff before each retry (default
+ *   [2000, 4000]); index i is the wait after attempt i+1.
+ * @param {(ms: number) => Promise<void>} [opts.sleep]   Backoff sleep (injectable for tests).
  * @param {boolean|object} [opts.ssl]          `pg` ssl option. Default
  *   `{ rejectUnauthorized: true }`; pass `false` for a local Docker server.
  * @param {number} [opts.pollIntervalMs]       Poll cadence (default 3000).
@@ -50,8 +61,8 @@
  * @param {number} [opts.agentRetentionMs]     Drop agent rows not heartbeating within this
  *   window (default 604_800_000 = 7 d; LONGER than the message TTL so durable exact-id
  *   delivery to an away machine isn't cut short).
- * @param {import('../seams/log.mjs').Logger} [opts.log]   Optional diagnostic logger.
- * @returns {import('../seams/transport.mjs').Transport}
+ * @param {Logger} [opts.log]   Optional diagnostic logger.
+ * @returns {Transport}
  */
 export function createPostgresTransport({
   host,
@@ -59,6 +70,9 @@ export function createPostgresTransport({
   database,
   port = 5432,
   connectionTimeoutMillis = 30000,
+  connectMaxAttempts = 3,
+  connectBackoffsMs = [2000, 4000],
+  sleep = defaultSleep,
   ssl = { rejectUnauthorized: true },
   pollIntervalMs = 3000,
   heartbeatIntervalMs = 9000,
@@ -85,7 +99,7 @@ export function createPostgresTransport({
   let pool;
   /** Lazily-imported `pg` module namespace (loaded once in init). */
   let pg;
-  /** @type {import('../seams/identity.mjs').AgentIdentity} */
+  /** @type {AgentIdentity} */
   let self;
   /** @type {ReturnType<typeof setInterval> | null} */
   let timer = null;
@@ -139,7 +153,7 @@ export function createPostgresTransport({
   }
 
   function toMessage(row) {
-    /** @type {import('../core/message.mjs').Message} */
+    /** @type {Message} */
     const message = {
       id: row.id,
       from: row.from_name,
@@ -229,39 +243,66 @@ export function createPostgresTransport({
         } catch (err) {
           throw new Error(
             "the 'postgres' transport requires the 'pg' package — run `npm install` " +
-              `in the agent-relay folder (original: ${err.message})`,
+              `in the agent-relay-pg plugin folder (original: ${err.message})`,
           );
         }
       }
-      pool = new pg.Pool({
-        host,
-        user,
-        database,
-        port,
-        ssl,
-        // Async password from the Credentials seam → minted per NEW connection.
-        // For Azure this is a fresh Entra token; for local/dev a static env value.
-        password: async () => (await ctx.credentials.get()) ?? undefined,
-        max: 4,
-        maxLifetimeSeconds: 2700, // recycle connections before a token would expire
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis,
-      });
-      // An idle-client error must never crash the host process.
-      pool.on("error", (err) => log(`pg pool error: ${err.message}`));
-      try {
-        await migrate(pool, log);
-      } catch (err) {
-        // init failed (unreachable host, bad creds, refuse-newer schema, …) —
-        // release the pool so a leaked idle client can't keep the process alive,
-        // then rethrow so the caller can retry (on a fresh instance) or surface it.
+
+      // Connect-retry lives HERE: the transport owns its own connect resilience
+      // (the entry no longer retries). A transient/slow initial connect is retried
+      // a few times — each attempt bounded by the pool's connectionTimeoutMillis
+      // fast-fail — with a bounded backoff. A DETERMINISTIC schema-version error
+      // ("newer than this build") can't heal, so it is NOT retried. On terminal
+      // failure the error propagates so the entry marks the relay inactive.
+      const attempts = Math.max(1, connectMaxAttempts);
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        pool = new pg.Pool({
+          host,
+          user,
+          database,
+          port,
+          ssl,
+          // Async password from the Credentials seam → minted per NEW connection.
+          // For Azure this is a fresh Entra token; for local/dev a static env value.
+          password: async () => (await ctx.credentials.get()) ?? undefined,
+          max: 4,
+          maxLifetimeSeconds: 2700, // recycle connections before a token would expire
+          idleTimeoutMillis: 30000,
+          connectionTimeoutMillis,
+        });
+        // An idle-client error must never crash the host process.
+        pool.on("error", (err) => log(`pg pool error: ${err.message}`));
         try {
-          await pool.end();
-        } catch {
-          /* already ended */
+          await migrate(pool, log);
+          return; // connected + schema ready
+        } catch (err) {
+          // This attempt failed (unreachable host, bad creds, refuse-newer schema,
+          // …) — release the pool so a leaked idle client can't keep the process
+          // alive, then decide whether to retry.
+          try {
+            await pool.end();
+          } catch {
+            /* already ended */
+          }
+          pool = null;
+          const deterministic = /newer than this build/i.test(err.message || "");
+          const isFinal = attempt === attempts;
+          if (deterministic || isFinal) {
+            if (isFinal && !deterministic && attempts > 1) {
+              log(
+                `postgres: connect failed after ${attempts} attempts — giving up (${err.message})`,
+                { level: "error" },
+              );
+            }
+            throw err;
+          }
+          log(
+            `postgres: connect failed (attempt ${attempt}/${attempts}) — retrying (${err.message})`,
+            { level: "warning" },
+          );
+          const backoff = connectBackoffsMs[attempt - 1] ?? 0;
+          if (backoff > 0) await sleep(backoff);
         }
-        pool = null;
-        throw err;
       }
     },
 
@@ -454,7 +495,7 @@ export const TARGET_SCHEMA = 1;
  * on a newer schema than this build supports (the entry then falls back).
  *
  * @param {import('pg').Pool} pool
- * @param {import('../seams/log.mjs').Logger} log
+ * @param {Logger} log
  */
 export async function migrate(pool, log = () => {}) {
   const client = await pool.connect();

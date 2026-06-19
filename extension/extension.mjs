@@ -1,10 +1,10 @@
 // agent-relay — Copilot CLI extension entry.
 //
-// Composition root + lifecycle: it joins the foreground session, resolves the seams
-// from config.mjs, chooses boot policy (connect-retry + inactive-on-failure for an
-// explicit cross-machine transport), constructs the core relay, and manages
-// lifecycle. All BEHAVIOR lives in core/ + the chosen adapters; the only decisions
-// here are which adapters and which boot policy to wire — the composition root's job.
+// Lifecycle host (thin): it joins the foreground session, sets up logging, awaits
+// the async composition root (createConfig, which loads plugins + assembles the
+// seams), brings the composed config online via bootstrap, and manages lifecycle
+// (tools, hooks, signals, shutdown). It makes NO wiring decisions of its own — all
+// seam selection lives in createConfig; all BEHAVIOR lives in core/ + the adapters.
 //
 // Requires `copilot --experimental` (extensions are gated behind it) and Node 22+.
 
@@ -18,7 +18,6 @@ import { resolveDataDir } from "./storage/paths.mjs";
 import { aliasFor } from "./identity/local-alias.mjs";
 import { createRollingFileLog } from "./logging/rolling-file-log.mjs";
 import { createRelayLog } from "./logging/relay-log.mjs";
-import { loadExternalInterceptors } from "./plugins/loader.mjs";
 
 // Load project-local config from a gitignored `.env` (if present) BEFORE anything
 // reads process.env — fills gaps only, so shell-exported vars still win. Lets the
@@ -188,44 +187,20 @@ if (loadedEnvFile) {
   );
 }
 
-// When the user EXPLICITLY selected the cross-machine (Postgres) transport, a boot
-// failure must SURFACE — the relay goes inactive — rather than silently dropping to
-// a different, single-machine local mesh (which caused confusing "why can't my
-// machines see each other" situations). Retry transient/slow connects a few times
-// first; the local default gets a single attempt, since a local store failure won't
-// heal by retrying.
-const isCrossMachine = process.env.AGENT_RELAY_TRANSPORT === "postgres";
-const retry = isCrossMachine
-  ? { attempts: 3, attemptTimeoutMs: 30_000, backoffsMs: [2_000, 4_000] }
-  : undefined;
-
 // One boot line establishes the per-session context every later line is read against:
-// which mesh this session is on (local single-machine vs the postgres host) and where
-// its data + logs live. Without it, a shared log can't be correlated to a transport.
-relayLog(
-  `boot transport=${isCrossMachine ? `postgres host=${process.env.AGENT_RELAY_PG_HOST ?? "?"}` : "local"}` +
-    ` datadir=${dataDir ?? "?"}`,
-);
-
-// Load EXTERNAL interceptors (guardrails/middleware) from the plugin dir + env-var
-// pointer, to compose into the chain. Loaded ONCE here (async) and reused on every
-// retry attempt. Safe-degrade: a broken plugin is skipped + logged, never blocks
-// startup. Plugins are trusted user code — this is not a sandbox.
-const externalInterceptors = await loadExternalInterceptors({
-  env: process.env,
-  dataDir,
-  log: relayLog,
-});
+// where this session's data + logs live. Without it, a shared log can't be correlated
+// to a session. (Which transport this lands on is decided by the plugin graph inside
+// createConfig, surfaced on the terminal "connected" line below.)
+relayLog(`boot datadir=${dataDir ?? "?"}`);
 
 try {
-  // All substrate composition lives in config.mjs; the entry only supplies the
-  // session + log + retry policy and performs the boot via the testable bootstrap.
-  const started = await startRelaySession({
-    session,
-    createConfig: () => createConfig({ log: relayLog, interceptors: externalInterceptors }),
-    retry,
-    log: relayLog,
-  });
+  // All wiring lives in createConfig (the async composition root): it loads plugins
+  // and assembles the seam bundle, throwing FAIL-LOUD on any bad plugin. The entry
+  // only supplies env + dataDir + log, then brings the composed config online via
+  // the testable bootstrap. A plugin can supply any seam, including the transport;
+  // with none, this is the dependency-free local default.
+  const config = await createConfig({ env: process.env, dataDir, log: relayLog });
+  const started = await startRelaySession({ session, config, log: relayLog });
   relay = started.relay;
   self = started.self;
   transport = started.transport;
@@ -237,8 +212,9 @@ try {
   );
   // The ONE line the user sees in the terminal on a successful join (🌐 = the
   // agent-mesh heritage icon): replaces the old boot + "registered … ready" noise.
+  // `config.remote` is true when a plugin supplied the transport, false on the local default.
   relayLog(
-    `🌐 agent-relay: connected to ${isCrossMachine ? "remote" : "local"} transport as [${self.name}]`,
+    `🌐 agent-relay: connected to ${config.remote ? "remote" : "local"} transport as [${self.name}]`,
     { terminal: true },
   );
   // If a teardown was requested while we were booting, honor it now.
@@ -247,11 +223,11 @@ try {
     await shutdown();
   }
 } catch (err) {
+  // Any boot failure (a bad plugin, or a transport that couldn't come up) marks the
+  // relay INACTIVE for this session - no silent fallback to a different mesh. The
+  // error message (which names a failing plugin) is surfaced for the user.
   bootError = err.message;
-  const suggestion = isCrossMachine
-    ? " — agent-relay is INACTIVE this session (not on any mesh). Fix connectivity and restart, or unset AGENT_RELAY_TRANSPORT to use the local single-machine mesh."
-    : "";
-  relayLog(`agent-relay failed to start: ${err.message}${suggestion}`, { level: "error" });
+  relayLog(`agent-relay failed to start: ${err.message}`, { level: "error" });
 } finally {
   // Startup window closed: from here on, only errors (not warnings) surface inline.
   booting = false;

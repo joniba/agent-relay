@@ -3,84 +3,62 @@ import { fileURLToPath } from "node:url";
 
 import { createLocalAliasIdentity } from "./identity/local-alias.mjs";
 import { createNoneCredentials } from "./credentials/none.mjs";
-import { createEnvPasswordCredentials } from "./credentials/env-password.mjs";
-import { createAzureEntraCredentials } from "./azure/index.mjs";
 import { createSqlitePollTransport } from "./transports/sqlite-poll.mjs";
-import { createPostgresTransport } from "./transports/postgres.mjs";
 import { dataFile, ensureDataDir } from "./storage/paths.mjs";
 import { migrateLocalDbOnce } from "./storage/local-db.mjs";
+import { loadPlugins } from "./plugins/loader.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Composition root — the SINGLE place adapters are chosen (OCP). To use a
- * different transport, identity scheme, or credential source, edit ONLY this
- * function. Interceptors (guardrails/middleware) are NOT baked in here — the entry
- * loads EXTERNAL interceptor modules (see `plugins/loader.mjs`) and passes them in
- * via `interceptors`, so a private guardrail need not live in this repo.
+ * Composition root - the SINGLE place the seam bundle is assembled (OCP). It is
+ * `async` and does the wiring itself: load plugins into a registry, then fold the
+ * registry over the zero-infra local default.
  *
- * Substrate selection:
- *   - `AGENT_RELAY_TRANSPORT=postgres` → the cross-machine Postgres transport
- *     (shared DB; settings from AGENT_RELAY_PG_*). Credentials:
- *       · if `AGENT_RELAY_PG_PASSWORD` is set → the vendor-neutral env-password
- *         provider (a plain password server — local Docker / CI / tests), or
- *       · otherwise → the Azure Entra token provider (the real cross-machine
- *         path; the Azure SDK is imported lazily inside that provider, so it is
- *         loaded ONLY here and never on the local default).
- *     This is the single cross-machine mesh.
- *   - otherwise →  the zero-infra local default: SQLite-poll (DB in the canonical
-  *     per-user data dir; override with AGENT_RELAY_DB or AGENT_RELAY_DATA_DIR), no
-  *     credentials.
+ * Every seam - transport, credentials, identity, and the interceptor chain - may
+ * now come from a plugin (see `plugins/loader.mjs`). With NO plugins this returns
+ * the dependency-free local default: SQLite-poll transport (DB in the canonical
+ * per-user data dir; override with AGENT_RELAY_DB or AGENT_RELAY_DATA_DIR), no
+ * credentials, the local wordlist-alias identity, and an empty interceptor chain.
  *
- * Identity is always the local wordlist alias (override the name with
- * AGENT_RELAY_NAME). No interceptors by default.
+ * Folding rules (from the registry):
+ *   - `interceptors` aggregate (every plugin's, in load order).
+ *   - `transport` is single-instance, last-loaded wins; when a plugin supplies one
+ *     we use it and pair it with `registry.credentials ?? none`. When none does, we
+ *     fall back to the local SQLite slice.
+ *   - `identity` is single-instance, last-loaded wins; defaults to the local alias.
+ *
+ * Loading is FAIL-LOUD: a bad/invalid plugin makes `loadPlugins` throw, which
+ * propagates here so the entry marks the relay inactive (no silent fallback).
  *
  * @param {object} [opts]
- * @param {import('./seams/log.mjs').Logger} [opts.log]
- *   Diagnostic logger handed to transports that emit observability events
- *   (pool errors, dead-letter, sweep). Defaults to a no-op.
- * @param {import('./seams/interceptor.mjs').Interceptor[]} [opts.interceptors]
- *   External interceptors (loaded by the entry from the plugin dir / env-var) to
- *   compose into the chain. Defaults to none.
- * @returns {{
+ * @param {NodeJS.ProcessEnv} [opts.env]   Environment to read plugin config from. Defaults to `process.env`.
+ * @param {string|null} [opts.dataDir]     Canonical data dir; its `plugins/` subdir is scanned. May be null.
+ * @param {import('./seams/log.mjs').Logger} [opts.log]   Diagnostic logger handed to plugins/transports. No-op by default.
+ * @returns {Promise<{
  *   identity: import('./seams/identity.mjs').IdentityProvider,
  *   credentials: import('./seams/credentials.mjs').CredentialProvider,
  *   transport: import('./seams/transport.mjs').Transport,
  *   interceptors: import('./seams/interceptor.mjs').Interceptor[],
- * }}
+ *   remote: boolean,
+ * }>}
  */
-export function createConfig({ log = () => {}, interceptors = [] } = {}) {
-  if (process.env.AGENT_RELAY_TRANSPORT === "postgres") {
-    const credentials = process.env.AGENT_RELAY_PG_PASSWORD
-      ? createEnvPasswordCredentials()
-      : createAzureEntraCredentials({ tenantId: process.env.AGENT_RELAY_AZURE_TENANT });
-    return {
-      identity: createLocalAliasIdentity(),
-      credentials,
-      transport: createPostgresTransport({
-        host: process.env.AGENT_RELAY_PG_HOST,
-        user: process.env.AGENT_RELAY_PG_USER,
-        database: process.env.AGENT_RELAY_PG_DB,
-        port: process.env.AGENT_RELAY_PG_PORT ? Number(process.env.AGENT_RELAY_PG_PORT) : 5432,
-        // TLS on by default (Azure); a local Docker server sets AGENT_RELAY_PG_SSL=false.
-        ssl: process.env.AGENT_RELAY_PG_SSL === "false" ? false : { rejectUnauthorized: true },
-        // Opt-in verbose sweep tracing (AGENT_RELAY_DEBUG=1|true|yes|on); silent otherwise.
-        debug: /^(1|true|yes|on)$/i.test(process.env.AGENT_RELAY_DEBUG ?? ""),
-        log,
-      }),
-      interceptors,
-    };
-  }
-
+export async function createConfig({ env = process.env, dataDir, log = () => {} } = {}) {
+  const registry = await loadPlugins({ env, dataDir, log });
   return {
-    identity: createLocalAliasIdentity(),
-    interceptors,
-    ...localSlice(),
+    identity: registry.identity ?? createLocalAliasIdentity(),
+    interceptors: registry.interceptors,
+    // `remote` is a non-seam hint for the entry's boot/connected log lines: true when
+    // a plugin supplied the transport, false on the local default. NOT used for wiring.
+    remote: !!registry.transport,
+    ...(registry.transport
+      ? { transport: registry.transport.create({ log }), credentials: registry.credentials ?? createNoneCredentials() }
+      : localSlice(env)),
   };
 }
 
 /**
- * The local SQLite slice (transport + its no-op credentials) — the zero-infra
+ * The local SQLite slice (transport + its no-op credentials) - the zero-infra
  * default. Kept here so all composition lives at the root; createConfig calls it.
  *
  * @returns {{
@@ -88,8 +66,8 @@ export function createConfig({ log = () => {}, interceptors = [] } = {}) {
  *   credentials: import('./seams/credentials.mjs').CredentialProvider,
  * }}
  */
-function localSlice() {
-  const explicitDb = process.env.AGENT_RELAY_DB;
+function localSlice(env = process.env) {
+  const explicitDb = env.AGENT_RELAY_DB;
   if (explicitDb) {
     return {
       credentials: createNoneCredentials(),

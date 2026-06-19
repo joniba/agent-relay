@@ -22,14 +22,14 @@ The companion provisioning script lives at `scripts/provision-azure.ps1` (it run
 
 agent-relay's core never knows Azure exists. The cross-machine **Postgres
 transport is vendor-neutral** (`pg` only) and obtains its connection password
-through the **Credentials seam** (`extension/seams/credentials.mjs`). The
-composition root (`extension/config.mjs`) is the single place that picks this
-Azure credential for the Postgres profile:
+through the **Credentials seam** (a duck-typed `{ async get() }` provider). The
+pg-plugin's `index.mjs` factory is the single place that picks this Azure
+credential (or the env-password provider) for the Postgres transport:
 
 ```js
 import { createAzureEntraCredentials } from "./azure/index.mjs";
-// …in the postgres branch:
-credentials: createAzureEntraCredentials(),
+// …in the plugin factory's `credentials`:
+credentials: () => createAzureEntraCredentials({ tenantId: env.AGENT_RELAY_AZURE_TENANT }),
 ```
 
 `pg` accepts an async function for its `password`, so the transport calls

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   createAzureEntraCredentials,
   PG_AAD_SCOPE,
-} from "../extension/azure/credentials.mjs";
+} from "../credentials/azure/credentials.mjs";
 
 // A fake Azure TokenCredential — records the scope it was asked for and returns
 // a canned token. No network, no @azure/identity needed (we inject this).

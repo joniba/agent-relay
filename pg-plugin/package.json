@@ -1,0 +1,17 @@
+{
+  "name": "agent-relay-pg",
+  "version": "0.1.0",
+  "description": "Cross-machine Postgres transport plugin for agent-relay (self-contained drop-in).",
+  "type": "module",
+  "main": "index.mjs",
+  "agentRelay": {
+    "entry": "index.mjs"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "pg": "^8.21.0",
+    "@azure/identity": "^4.5.0"
+  }
+}

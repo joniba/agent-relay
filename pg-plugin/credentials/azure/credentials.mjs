@@ -7,7 +7,7 @@
  * with no change to the rest of the extension (the transport depends on the
  * Credentials *seam*, never on this module directly).
  *
- * Honors the {@link import('../seams/credentials.mjs').CredentialProvider} shape:
+ * Honors the {@link CredentialProvider} shape:
  * `get()` resolves to the raw token string (the transport passes it as the `pg`
  * connection password). Returns a fresh token each call, so a caller that invokes
  * `get()` per new connection always authenticates with a current token.
@@ -23,7 +23,7 @@
  *   tenant enforces MFA), so the token targets the server's tenant explicitly
  *   instead of relying on the `az` default context. Ignored when a `credential`
  *   is injected.
- * @returns {import('../seams/credentials.mjs').CredentialProvider}
+ * @returns {CredentialProvider}
  */
 export function createAzureEntraCredentials({ credential, scope = PG_AAD_SCOPE, tenantId } = {}) {
   // Construct the default credential lazily only when none is injected, so the

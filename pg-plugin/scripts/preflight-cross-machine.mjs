@@ -3,22 +3,24 @@
  * Cross-machine preflight — verifies that a cross-machine (Postgres) session will
  * ACTUALLY connect, using the real credential + transport path (not a shortcut).
  *
- * Run by `scripts/install.ps1` against the freshly-installed extension dir, after
- * `az login`. Exits 0 on success, or a SPECIFIC non-zero code with a human
- * message classifying the failure so the installer can tell the user exactly what
- * to fix.
+ * Run after `az login` (e.g. by the installer) against the installed extension
+ * dir. Exits 0 on success, or a SPECIFIC non-zero code with a human message
+ * classifying the failure so the caller can tell the user exactly what to fix.
  *
  * Usage:  node scripts/preflight-cross-machine.mjs <installed-extension-dir>
  *
- * It loads the installed `.env` (so it tests the same config a real session will),
- * builds the composition-root config, and brings the transport up (init → stop).
- * `init()` connects, mints an Entra token via the Credentials seam, and runs the
- * schema migration — i.e. it exercises auth, TLS, reachability, and schema in one
- * shot, exactly as a real session does.
+ * It loads the installed `.env` (so it tests the same config a real session will,
+ * best-effort via the installed env loader), builds THIS plugin's transport +
+ * credentials from its own factory (`../index.mjs`), and brings the transport up
+ * (init → stop). `init()` connects, mints an Entra token via the Credentials
+ * provider, and runs the schema migration — i.e. it exercises auth, TLS,
+ * reachability, and schema in one shot, exactly as a real session does.
  */
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
+
+import createPgPlugin from "../index.mjs";
 
 export const EXIT = {
   OK: 0,
@@ -63,7 +65,7 @@ export function classify(err, env = process.env) {
   if (/requires the 'pg' package/i.test(msg)) {
     return {
       code: EXIT.PG_MISSING,
-      message: `The 'pg' package isn't installed.\n→ Run 'npm install' in the agent-relay clone, then re-install.`,
+      message: `The 'pg' package isn't installed.\n→ Run 'npm install' in the agent-relay-pg plugin folder, then re-try.`,
     };
   }
   // Wrong tenant / account — checked BEFORE the generic no-auth case below, since
@@ -112,29 +114,34 @@ async function main() {
   const dir = process.argv[2];
   if (!dir) fail(EXIT.OTHER, "preflight: missing <installed-extension-dir> argument");
 
-  let loadEnvFile, createConfig;
+  // Best-effort: load the installed `.env` exactly as a real session does, via the
+  // installed extension's own env loader (so the same config gaps get filled). If
+  // the installed dir has no env loader, fall back to the ambient environment.
   try {
-    ({ loadEnvFile } = await import(pathToFileURL(join(dir, "env-file.mjs")).href));
-    ({ createConfig } = await import(pathToFileURL(join(dir, "config.mjs")).href));
-  } catch (err) {
-    fail(EXIT.OTHER, `preflight: cannot load the installed extension at ${dir}: ${err.message}`);
+    const { loadEnvFile } = await import(pathToFileURL(join(dir, "env-file.mjs")).href);
+    loadEnvFile?.();
+  } catch {
+    /* no installed env loader — rely on the ambient environment */
   }
 
-  // Load the installed .env exactly as the entry does (fills process.env gaps).
-  loadEnvFile();
-  if (process.env.AGENT_RELAY_TRANSPORT !== "postgres") {
-    fail(EXIT.OTHER, "preflight: AGENT_RELAY_TRANSPORT is not 'postgres' — not a cross-machine config.");
+  if (!process.env.AGENT_RELAY_PG_HOST) {
+    fail(
+      EXIT.OTHER,
+      "preflight: AGENT_RELAY_PG_HOST is not set — not a cross-machine (Postgres) config.",
+    );
   }
 
   const self = { id: `preflight-${Date.now()}`, name: "preflight", deviceName: "preflight" };
   let transport;
   try {
-    // createConfig() is INSIDE the try: an incomplete .env makes it throw
-    // synchronously ("requires a host/user/database"), which we then classify to
-    // ENV_INCOMPLETE rather than letting it escape as a raw stack trace.
-    const cfg = createConfig({ log: () => {} });
-    transport = cfg.transport;
-    await transport.init({ self, credentials: cfg.credentials });
+    // Build the transport + credentials from THIS plugin's own factory — the same
+    // path a real session takes through the plugin loader. An incomplete config
+    // makes init() throw ("requires a host/user/database"), which classify() maps
+    // to ENV_INCOMPLETE rather than letting it escape as a raw stack trace.
+    const plugin = createPgPlugin({ env: process.env });
+    transport = plugin.transport.create({ log: () => {} });
+    const credentials = plugin.credentials();
+    await transport.init({ self, credentials });
     await transport.stop();
     process.stdout.write("preflight: OK — connected to the cross-machine database.\n");
     process.exit(EXIT.OK);
