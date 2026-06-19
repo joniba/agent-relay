@@ -208,7 +208,7 @@ try {
   // File-only registration detail (id/name/device) for the log; the human-facing
   // confirmation is the single terminal line below.
   relayLog(
-    `registered id=${String(self.id ?? "").slice(0, 8)} name=${self.name} device=${self.deviceName ?? "?"}`,
+    `registered id=${String(self.id ?? "").slice(0, 8)} name=${self.name}`,
   );
   // The ONE line the user sees in the terminal on a successful join (🌐 = the
   // agent-mesh heritage icon): replaces the old boot + "registered … ready" noise.

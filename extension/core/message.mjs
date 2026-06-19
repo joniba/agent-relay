@@ -12,10 +12,10 @@ import { randomUUID } from "node:crypto";
  * counts, trust/authority labels, priorities, correlation ids, …) and a
  * conformant transport carries it through untouched. The core never lets `meta`
  * change ROUTING or delivery BEHAVIOR — this is the OCP escape hatch so future
- * guardrails need no core change. (The core does stamp + read ONE diagnostic
- * provenance key — `meta.fromDevice`, the sender's machine — for observability
- * only, e.g. showing the source machine in a `recv` log line; it never affects
- * delivery.)
+ * guardrails need no core change. (The core does stamp ONE provenance key —
+ * `meta.fromId`, the sender's session id — used by the default wake-prompt header
+ * so the recipient knows the id to reply to; it never affects delivery.
+ * Machine/device provenance is added by a transport's plugin interceptor, not core.)
  *
  * @typedef {object} Message
  * @property {string} id          Unique message id.

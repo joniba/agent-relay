@@ -37,13 +37,6 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
     }
   }
 
-  // Append "@<device>" only when the peer is on a DIFFERENT machine than us, so
-  // single-machine logs stay clean and cross-machine hops stand out. `self.deviceName`
-  // is this session's host (set by the entry); a peer device equal to it is same-machine.
-  function withDevice(name, device) {
-    return device && device !== self.deviceName ? `${name}@${device}` : name;
-  }
-
   /**
    * `send_message` tool handler. Plain in/out shape; the SDK adapter (bootstrap)
    * maps tool-call args to this and formats the result.
@@ -63,9 +56,10 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
       to,
       body: content,
       inReplyTo,
-      // Stamp our own machine so the RECIPIENT can show the source machine on `recv`
-      // (cross-machine provenance via the opaque meta bag; absent single-machine).
-      meta: self.deviceName ? { fromDevice: self.deviceName } : undefined,
+      // Stamp our session id as machine-agnostic provenance: the recipient's default
+      // header shows `<from-alias>-<from-id>` so it knows the id to reply to. Any
+      // machine/device provenance is added by a transport's plugin interceptor, not core.
+      meta: { fromId: self.id },
     });
 
     const gated = await runChain(interceptors, "onSend", message);
@@ -78,7 +72,7 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
       return { ok: false, error: (result && result.error) || "transport rejected the message" };
     }
     const id = result.id ?? gated.id;
-    note(`sent msg=${id} to=${withDevice(to, result.device)} (${ms}ms)`);
+    note(`sent msg=${id} to=${to} (${ms}ms)`);
     return { ok: true, id };
   }
 
@@ -110,7 +104,7 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
     try {
       const gated = await runChain(interceptors, "onReceive", message);
       if (!gated) return; // dropped by an interceptor — consumed, no retry
-      prompt = renderPrompt(interceptors, gated);
+      prompt = renderPrompt(interceptors, gated, self);
     } catch (err) {
       // Poison: interceptor/renderer threw. Consume (no retry) and log.
       if (typeof sink.log === "function") {
@@ -126,8 +120,7 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
       }
       return;
     }
-    const fromDevice = message.meta && message.meta.fromDevice;
-    note(`recv msg=${message.id} from=${withDevice(message.from, fromDevice)}`);
+    note(`recv msg=${message.id} from=${message.from}`);
     // Wake failures propagate → the transport may redeliver.
     await sink.wake(prompt);
   }
