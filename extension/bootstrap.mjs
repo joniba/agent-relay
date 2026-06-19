@@ -5,7 +5,7 @@
 // exercises the partial-boot cleanup path deterministically.
 //
 // Responsibilities (all entry-level wiring, no policy of its own):
-//   - resolve identity and stamp the display-only device name,
+//   - resolve identity,
 //   - bring the transport online: init() then register(); if either throws, stop()
 //     the (possibly half-opened) transport before propagating, so a partly-inited
 //     transport never leaks,
@@ -15,8 +15,6 @@
 // Transport's own concern (its init() owns any retry). There is deliberately no
 // fallback to a different substrate - a connect failure propagates so the entry
 // marks the relay inactive rather than silently partitioning the mesh.
-
-import { hostname } from "node:os";
 
 import { createRelay } from "./core/relay.mjs";
 import { createCopilotSink } from "./sinks/copilot.mjs";
@@ -46,11 +44,6 @@ import { createCopilotSink } from "./sinks/copilot.mjs";
  */
 export async function startRelaySession({ session, config, log }) {
   const self = await config.identity.resolve(session);
-  // Display-only device name (the machine this session runs on). Surfaced in the
-  // cross-machine roster (e.g. "gull (my-laptop)") so a human can tell machines
-  // apart; NEVER used for addressing or collision. A transport that doesn't store
-  // it (the local SQLite default) simply ignores it.
-  self.deviceName = process.env.AGENT_RELAY_HOST || hostname();
 
   try {
     await config.transport.init({ self, credentials: config.credentials });

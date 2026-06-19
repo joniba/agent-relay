@@ -61,6 +61,9 @@ const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {number} [opts.agentRetentionMs]     Drop agent rows not heartbeating within this
  *   window (default 604_800_000 = 7 d; LONGER than the message TTL so durable exact-id
  *   delivery to an away machine isn't cut short).
+ * @param {string} [opts.machine]   This session's machine/host label. The PLUGIN
+ *   provides it (core is machine-agnostic); it is stored as the agent's
+ *   `device_name` and surfaced on `listAgents` entries as `attributes.machine`.
  * @param {Logger} [opts.log]   Optional diagnostic logger.
  * @returns {Transport}
  */
@@ -68,6 +71,7 @@ export function createPostgresTransport({
   host,
   user,
   database,
+  machine,
   port = 5432,
   connectionTimeoutMillis = 30000,
   connectMaxAttempts = 3,
@@ -141,7 +145,7 @@ export function createPostgresTransport({
          ON CONFLICT (id) DO UPDATE
            SET name = excluded.name, device_name = excluded.device_name,
                online = true, last_heartbeat = now()`,
-        [identity.id, name, identity.deviceName ?? null],
+        [identity.id, name, machine ?? null],
       );
       await client.query("COMMIT");
     } catch (err) {
@@ -328,7 +332,7 @@ export function createPostgresTransport({
       return rows.map((r) => ({
         id: r.id,
         name: r.name,
-        ...(r.device_name ? { deviceName: r.device_name } : {}),
+        ...(r.device_name ? { attributes: { machine: r.device_name } } : {}),
       }));
     },
 
@@ -369,7 +373,7 @@ export function createPostgresTransport({
           JSON.stringify(message.meta ?? {}),
         ],
       );
-      return { accepted: true, id: message.id, device: recipient.device_name ?? undefined };
+      return { accepted: true, id: message.id };
     },
 
     startReceiving(onMessage) {

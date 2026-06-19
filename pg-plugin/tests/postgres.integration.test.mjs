@@ -150,18 +150,19 @@ test("two registrants racing the SAME alias get DISTINCT names", { skip }, async
   await b.stop();
 });
 
-test("listAgents returns live peers with device names; hides stale", { skip }, async () => {
-  // Two separate transports = two sessions (each owns its `self`/heartbeat).
-  const a = makeTransport({ staleMs: 800 });
-  const b = makeTransport({ staleMs: 800 });
+test("listAgents returns live peers with machine attributes; hides stale", { skip }, async () => {
+  // Two separate transports = two sessions (each owns its `self`/heartbeat). The
+  // machine label is a TRANSPORT option (the plugin provides it; core is agnostic).
+  const a = makeTransport({ staleMs: 800, machine: "my-laptop" });
+  const b = makeTransport({ staleMs: 800, machine: "my-desktop" });
   await a.init(ctx("la", "alpha"));
   await b.init(ctx("lb", "beta"));
-  await a.register(ident("la", "alpha", null, "my-laptop"));
-  await b.register(ident("lb", "beta", null, "my-desktop"));
+  await a.register(ident("la", "alpha"));
+  await b.register(ident("lb", "beta"));
   let roster = await a.listAgents();
   const names = roster.map((r) => r.name).sort();
   assert.deepEqual(names, ["alpha", "beta"]);
-  assert.equal(roster.find((r) => r.name === "alpha").deviceName, "my-laptop");
+  assert.equal(roster.find((r) => r.name === "alpha").attributes.machine, "my-laptop");
   // a keeps heartbeating; b does NOT → b goes stale.
   a.startReceiving(async () => {});
   await wait(1200);

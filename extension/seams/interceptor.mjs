@@ -19,16 +19,17 @@
  *
  * `renderPrompt` lets an interceptor override how a received message becomes the
  * wake prompt. If no interceptor provides one, the core's neutral default
- * renderer is used (body + sender only).
+ * renderer is used (sender alias + id, recipient alias, body).
  *
  * @typedef {object} Interceptor
  * @property {(message: Message, next: NextFn) => (void | Promise<void>)} [onSend]
  *   Outbound hook, before the transport sends.
  * @property {(message: Message, next: NextFn) => (void | Promise<void>)} [onReceive]
  *   Inbound hook, before the session is woken.
- * @property {(message: Message) => (string | null)} [renderPrompt]
- *   Optional override of the wake-prompt text. Return null to defer to the next
- *   interceptor / the core default.
+ * @property {(message: Message, self: AgentIdentity) => (string | null)} [renderPrompt]
+ *   Optional override of the wake-prompt text. Receives the recipient identity
+ *   (`self`) for the `<to-alias>`. Return null to defer to the next interceptor /
+ *   the core default.
  */
 
 /**

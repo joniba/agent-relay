@@ -112,15 +112,6 @@ test("brings the transport online linearly: init -> register -> startReceiving",
   assert.equal(t.stopped, false);
 });
 
-test("stamps the display-only device name from AGENT_RELAY_HOST onto the identity", async () => {
-  await withEnv({ AGENT_RELAY_HOST: "test-box" }, async () => {
-    const t = fakeTransport();
-    const res = await startRelaySession({ session: fakeSession(), config: configFor(t), log() {} });
-    assert.equal(res.self.deviceName, "test-box");
-    assert.equal(t.calls.registeredSelf.deviceName, "test-box");
-  });
-});
-
 test("passes the resolved credentials into the transport's init ctx", async () => {
   const creds = { async get() { return "tok"; } };
   const t = fakeTransport();
