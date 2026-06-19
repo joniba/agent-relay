@@ -105,20 +105,16 @@ overrides for the defaults:
 | `AGENT_RELAY_NAME` | This session's mesh name | wordlist alias from session id |
 | `AGENT_RELAY_DB`   | Path to the local SQLite store | `agent-relay.db` in the data dir (below) |
 | `AGENT_RELAY_DATA_DIR` | Directory for local state + rolling diagnostic logs | per-user OS data dir (e.g. `%LOCALAPPDATA%\agent-relay`) |
-| `AGENT_RELAY_TRANSPORT` | `postgres` to join a cross-machine mesh (see below) | local SQLite |
-| `AGENT_RELAY_PG_HOST` / `_USER` / `_DB` | Shared Postgres connection settings (non-secret) | — |
-| `AGENT_RELAY_AZURE_TENANT` | Entra tenant id for the DB token (multi-tenant / MFA accounts) | `az` default context |
-| `AGENT_RELAY_HOST` | Device name shown beside each peer in the roster | the machine's hostname |
-| `AGENT_RELAY_DEBUG` | `1`/`true`/`yes`/`on` → log every periodic sweep (cross-machine); errors always shown | silent |
-| `AGENT_RELAY_ENV_FILE` | Explicit path to a `.env` to load | `extension/.env`, then repo-root `.env` |
+| `AGENT_RELAY_PLUGINS` | Comma-separated plugin module paths to load (a dev convenience) | — |
+| `AGENT_RELAY_PLUGIN_DIR` | Folder scanned for drop-in plugins | the extension's own `plugins/` folder |
 
 > All local-mode sessions that use the same SQLite store — the same default data dir, or the same
 > explicit `AGENT_RELAY_DB` — form one mesh.
 
-> **`.env` support:** any of these may be set in a gitignored `.env` (auto-loaded from
-> `extension/.env`, the repo root, or `$AGENT_RELAY_ENV_FILE`) instead of being exported — handy for
-> the cross-machine settings below. Shell-exported values take precedence. Copy `.env.example` to
-> start.
+> **No `.env` file:** core reads these directly from the environment — it does **not** auto-load a
+> `.env`. Export the ones you want before launching Copilot (see `.env.example` for the list). Cross-machine
+> / Postgres settings live with the [agent-relay-pg-plugin](https://github.com/joniba/agent-relay-pg-plugin),
+> not here.
 
 > **Data & logs:** the local SQLite store and a **rolling diagnostic log** live in a per-user data
 > directory — `%LOCALAPPDATA%\agent-relay\` (Windows), `~/Library/Application Support/agent-relay/`
@@ -128,153 +124,19 @@ overrides for the defaults:
 > when it passes 24h old, keeping the current file plus 3 older ones. (An existing in-install
 > `agent-relay.db` from an older version is migrated into the data dir automatically on first run.)
 
-## Cross-machine messaging (Azure Postgres)
+## Cross-machine messaging
 
-The default mesh is **single-machine** (local SQLite). To message and **wake sessions across
-machines**, point them at a shared PostgreSQL database. agent-relay ships a vendor-neutral
-Postgres transport plus an isolated Azure credential lib; on Azure the security boundary is a
-**Microsoft Entra token + TLS** — there is no password, and no IP allowlist.
-
-**Prerequisites:** the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) and
-`pwsh`, an Azure subscription, and permission to create a resource group + a PostgreSQL Flexible
-Server. If you have more than one subscription, select it first with
-`az account set --subscription <id-or-name>`.
-
-### 1. Provision once (per environment)
-
-Creates an Azure Database for PostgreSQL Flexible Server with Entra-only auth and TLS enforced.
-Idempotent — safe to re-run.
-
-```powershell
-az login                                       # an account with a subscription
-pwsh scripts/provision-azure.ps1 -ServerName pg-agent-relay-<unique>
-```
-
-The `-ServerName` must be **globally unique and lowercase** (it becomes the public
-`<name>.postgres.database.azure.com` DNS label).
-
-It prints the **non-secret** settings to export (host / user / database). It never creates or
-prints a password — there isn't one.
-
-> **Cost:** a rough compute estimate for the default Burstable **B1ms** SKU is ~$12–15/month
-> (excludes storage/backup and varies by region/currency — check the
-> [Azure pricing](https://azure.microsoft.com/pricing/details/postgresql/flexible-server/) for
-> exact figures). Tear it down when you're done (see below). **Region:** defaults to
-> `israelcentral`; override with `-Location`.
-
-### 2. Enable cross-machine on each machine
-
-On every machine that should join the **same** mesh, do **one** thing — drop in a `.env`, then run
-the installer. It detects cross-machine and does the rest.
-
-**Create `extension/.env` in the clone** with the four (non-secret) values from step 1 — quote any
-value containing `#` (start from `.env.example`):
-
-```ini
-# extension/.env  — copied into the install; the extension auto-loads it at startup
-AGENT_RELAY_TRANSPORT=postgres
-AGENT_RELAY_PG_HOST=pg-agent-relay-<unique>.postgres.database.azure.com
-AGENT_RELAY_PG_USER="<your-entra-admin-upn>"
-AGENT_RELAY_PG_DB=agentrelay
-# AGENT_RELAY_AZURE_TENANT=<tenant-id>       # set if your account spans multiple tenants or the DB tenant needs MFA
-# AZURE_CONFIG_DIR=C:\path\to\.azure-relay   # optional: isolate the az profile used for the token
-```
-
-**Then install the cross-machine plugin** — it installs core and runs the Azure preflight. It does **not**
-launch Copilot; start it in the Run step below. (The full provisioning walkthrough is moving to the
-plugin's own README; cross-machine support now lives in the separate `agent-relay-pg-plugin`.)
+The default mesh is **single-machine** (local SQLite). To wake sessions across **different machines**,
+install the **[agent-relay-pg-plugin](https://github.com/joniba/agent-relay-pg-plugin)** — a drop-in
+plugin that swaps the local SQLite transport for a shared **Postgres** mesh (each machine mints its own
+short-lived Microsoft Entra token locally; tokens are never copied between machines) and adds machine
+provenance to the wake prompt and the `list_relay_agents` roster. It installs core alongside it:
 
 ```bash
 npx --yes github:joniba/agent-relay-pg-plugin
 ```
 
-Because the `.env` selects Postgres, the installer runs a **setup preflight** and does everything
-for you, stopping with a specific message if anything's wrong:
-
-1. checks the **Azure CLI** is installed,
-2. validates the `.env` has `AGENT_RELAY_PG_HOST` / `_USER` / `_DB`,
-3. runs **`npm install`** (fetches `pg` + `@azure/identity`) and bundles them into the install,
-4. **signs you in** — if you're not authenticated it launches **`az login`** (sign in as the DB
-   admin, targeting `AGENT_RELAY_AZURE_TENANT` if set). If it fails on a headless machine, run it
-   yourself with `--use-device-code` (and `--tenant <id>` if `AGENT_RELAY_AZURE_TENANT` is set), then
-   re-run,
-5. **verifies a real connection** to the shared database end-to-end.
-
-If verification fails, the message tells you exactly what to fix — e.g. *wrong account/tenant* (“sign
-in as the DB admin”), *unreachable host*, or *not signed in* — then re-run. Because you explicitly
-selected the cross-machine transport, a session that still can't connect **does not silently fall back
-to the local mesh** (that would split your machines onto separate, single-machine stores without
-telling you): it retries the connect a few times and then runs **inactive** — `send_message` /
-`list_relay_agents` report it's not started — until you fix connectivity **and restart**, or unset
-`AGENT_RELAY_TRANSPORT` and restart to use the local mesh.
-
-> **Multi-tenant / MFA:** if your `az` account belongs to more than one Entra tenant, or the
-> database's tenant enforces MFA, a plain `az login` can fail enumerating tenants (`AADSTS50076`,
-> “no subscriptions found”). Set **`AGENT_RELAY_AZURE_TENANT`** to the database's tenant id — the
-> installer then signs in and acquires the token against that tenant directly. (Find the id with
-> `az account show --query tenantId -o tsv` while signed into that tenant, or from the Azure portal.)
-
-> Each machine mints its **own** short-lived Entra token locally via its own `az login` — **tokens
-> are never copied between machines**. The four `.env` values are not secrets (a hostname, a
-> username, a database name). With the default provisioning there's exactly one DB admin, so every
-> machine must `az login` as **that same account** (`AGENT_RELAY_PG_USER`); a token for any other
-> account authenticates to Azure but is rejected by the database.
-
-<details><summary>Plain shell exports instead of a <code>.env</code></summary>
-
-Export the four values in your shell (these **win** over a `.env` if both are set), then run the
-installer — it still does the deps + `az login` + verification for you:
-
-```powershell
-$env:AGENT_RELAY_TRANSPORT = 'postgres'
-$env:AGENT_RELAY_PG_HOST   = 'pg-agent-relay-<unique>.postgres.database.azure.com'
-$env:AGENT_RELAY_PG_USER   = '<your-entra-admin-upn>'
-$env:AGENT_RELAY_PG_DB     = 'agentrelay'
-# $env:AZURE_CONFIG_DIR    = '<dir>'   # optional: isolate the az profile
-npx --yes github:joniba/agent-relay-pg-plugin
-```
-</details>
-
-### 3. Run
-
-```powershell
-copilot --experimental
-```
-
-Sessions on any machine with those settings (in `.env` or the environment) join one cross-machine
-mesh. `list_relay_agents`
-shows everyone, each tagged with its **device name** (the machine's hostname; override with
-`AGENT_RELAY_HOST`) so you can tell hosts apart — it's display-only, never used for addressing.
-
-### Resilience
-
-If the database can't be reached **at startup** (offline, not yet `az login`'d, an unsupported
-newer schema, …), the session **retries the connect a few times**; if it still can't connect it runs
-**inactive** for that session and does **not** silently fall back to the local single-machine mesh
-(that would split your machines onto separate stores without telling you). Fix connectivity and
-**restart**, or unset `AGENT_RELAY_TRANSPORT` and restart to use the local mesh. A transient
-mid-session blip is ridden out by the poll loop (the session stays up, no fallback). A session-owned,
-advisory-lock-guarded sweep prunes old messages (> 24 h) and long-gone peers (> 7 d), so no always-on
-cleanup job is required.
-
-### Security model
-
-- **Microsoft Entra token + TLS** is the entire boundary. Password auth is disabled on the server;
-  only a valid token for a server admin can connect.
-- **No IP allowlist** — home/office egress IPs rotate, so network location is not a control.
-  Public network access stays on, gated by authentication.
-- Tokens are minted locally per machine and **never stored or transferred**.
-
-### Teardown
-
-```powershell
-az group delete --name rg-agent-relay --yes        # removes the server + database
-```
-
-(Replace `rg-agent-relay` if you provisioned with a custom `-ResourceGroup`.)
-
-See [`extension/azure/README.md`](extension/azure/README.md) for the credential-lib internals and
-how to lift the Azure code into its own package (the core and transport never change).
+See that repo's README for provisioning, configuration, the security model, and teardown.
 
 ## Extending (the seams)
 
@@ -282,18 +144,17 @@ Swap any adapter by editing **only** `config.mjs` (or, for the Sink, the entry) 
 changes (OCP):
 
 - **Transport** (`extension/seams/transport.mjs`) — storage + delivery. Default:
-  `transports/sqlite-poll.mjs` (single-machine). For **cross-machine** messaging it ships
-  `transports/postgres.mjs` (vendor-neutral `pg`; shared DB + poll), selected with
-  `AGENT_RELAY_TRANSPORT=postgres` — see *Cross-machine messaging* above.
+  `transports/sqlite-poll.mjs` (single-machine, local SQLite). A **cross-machine** transport (shared
+  Postgres) is provided by the
+  [agent-relay-pg-plugin](https://github.com/joniba/agent-relay-pg-plugin), not core.
 - **Identity** (`seams/identity.mjs`) — how a session is named. Default: `identity/local-alias.mjs`.
-- **Credentials** (`seams/credentials.mjs`) — auth material a remote transport needs.
-  Default: `credentials/none.mjs`. For Postgres: `credentials/env-password.mjs` (a plain
-  password from the env, for local Docker / CI) or the Azure Entra token provider in
-  `extension/azure/` (the cross-machine path; password auth disabled server-side).
+- **Credentials** (`seams/credentials.mjs`) — auth material a transport needs. Default:
+  `credentials/none.mjs` (the local default needs none). A real credential provider — e.g. the Azure
+  Entra token provider for cross-machine Postgres — ships with the agent-relay-pg-plugin.
 - **Interceptor** (`seams/interceptor.mjs`) — middleware on send/receive and the wake
   prompt. The core ships **none**; this is where guardrails (authority, rate-limit,
   loop/hop guards, content filters) go. You can add interceptors **without editing this
-  repo** — drop in an external module via the plugin loader (see *External interceptors*
+  repo** — drop in an external module via the plugin loader (see *External plugins*
   below).
 - **Sink** (`seams/sink.mjs`) — *which agent runtime a delivered message wakes.* Default:
   `sinks/copilot.mjs` (wakes a Copilot CLI session via `session.send()`). The core is **not** locked
@@ -302,8 +163,8 @@ changes (OCP):
 
 ### External plugins
 
-A plugin loads **your own modules** at startup and can supply ANY core seam — interceptors (guardrails /
-middleware), or even the transport, credentials, or identity — so a capability can live in a separate,
+A plugin loads **your own modules** at startup and can supply any of four seams — interceptors (guardrails /
+middleware), the transport, credentials, or identity (the Sink is wired in the entry, not via plugins) — so a capability can live in a separate,
 even **private**, repo or a local folder, never in this one. Two sources, loaded in order (env entries
 first, then the directory, alphabetically):
 

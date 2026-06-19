@@ -4,9 +4,6 @@ working-docs/
 # Playwright MCP scratch (browser snapshots/logs)
 .playwright-mcp/
 
-# Phase-2 throwaway spike (Azure PG validation)
-spike-postgres/
-
 # Node
 node_modules/
 
