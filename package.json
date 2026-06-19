@@ -4,6 +4,13 @@
   "description": "Minimal, unopinionated cross-session messaging for GitHub Copilot CLI — wake one session from another via session.send(). Pluggable transport / identity / credentials / interceptors.",
   "type": "module",
   "main": "extension/extension.mjs",
+  "bin": {
+    "agent-relay": "scripts/install.mjs"
+  },
+  "files": [
+    "extension/",
+    "scripts/install.mjs"
+  ],
   "license": "MIT",
   "author": "joniba",
   "repository": {

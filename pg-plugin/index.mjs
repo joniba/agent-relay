@@ -3,6 +3,13 @@ import { hostname } from "node:os";
 import { createPostgresTransport } from "./transport/postgres.mjs";
 import { createEnvPasswordCredentials } from "./credentials/env-password.mjs";
 import { createAzureEntraCredentials } from "./credentials/azure/index.mjs";
+import { loadEnvFile } from "./env-file.mjs";
+
+// The pg-plugin owns ALL its config (D7): load its OWN gitignored `.env` (the pg
+// connection settings) into process.env when this plugin is imported — BEFORE the
+// factory reads them. Core no longer loads any `.env`. Search order:
+// $AGENT_RELAY_ENV_FILE, then `<this-plugin-dir>/.env`. Shell-exported vars win.
+loadEnvFile();
 
 /** Strip control chars from a peer-controlled header field so it can't forge line
  * breaks / framing in the wake prompt. (Self-contained copy — this plugin does not

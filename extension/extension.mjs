@@ -10,7 +10,6 @@
 
 import { joinSession } from "@github/copilot-sdk/extension";
 import { join } from "node:path";
-import { loadEnvFile } from "./env-file.mjs";
 import { createConfig } from "./config.mjs";
 import { startRelaySession } from "./bootstrap.mjs";
 import { formatRoster } from "./roster.mjs";
@@ -18,11 +17,6 @@ import { resolveDataDir } from "./storage/paths.mjs";
 import { aliasFor } from "./identity/local-alias.mjs";
 import { createRollingFileLog } from "./logging/rolling-file-log.mjs";
 import { createRelayLog } from "./logging/relay-log.mjs";
-
-// Load project-local config from a gitignored `.env` (if present) BEFORE anything
-// reads process.env — fills gaps only, so shell-exported vars still win. Lets the
-// cross-machine settings live with the project instead of in every shell.
-const loadedEnvFile = loadEnvFile();
 
 // Assigned during bootstrap (after joinSession resolves). The tool/hook handlers
 // below close over these and tolerate being called before bootstrap completes.
@@ -177,15 +171,6 @@ const relayLog = createRelayLog({
   fileLog,
   isBooting: () => booting,
 });
-
-// Surface which .env (if any) seeded the config — handy when diagnosing why a
-// session did or didn't join the cross-machine mesh.
-if (loadedEnvFile) {
-  relayLog(
-    `agent-relay: loaded config from ${loadedEnvFile.path}` +
-      (loadedEnvFile.applied.length ? ` (set ${loadedEnvFile.applied.join(", ")})` : " (no new keys)"),
-  );
-}
 
 // One boot line establishes the per-session context every later line is read against:
 // where this session's data + logs live. Without it, a shared log can't be correlated
