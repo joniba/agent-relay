@@ -16,8 +16,23 @@ import { test, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
-import { createPostgresTransport } from "../extension/transports/postgres.mjs";
-import { createMessage } from "../extension/core/message.mjs";
+import { createPostgresTransport } from "../transport/postgres.mjs";
+
+// Self-contained message builder (mirrors agent-relay core's createMessage) so
+// this plugin package has no back-import into core. Builds a Message with a
+// fresh id + timestamp and an opaque, transport-preserved `meta` bag.
+function createMessage({ from, to, body, inReplyTo, meta }) {
+  const message = {
+    id: randomUUID(),
+    from,
+    to,
+    body,
+    ts: new Date().toISOString(),
+    meta: meta ? { ...meta } : {},
+  };
+  if (inReplyTo) message.inReplyTo = inReplyTo;
+  return message;
+}
 
 const ENABLED = !!process.env.AGENT_RELAY_TEST_PG;
 const skip = ENABLED ? false : "set AGENT_RELAY_TEST_PG (+ a Docker Postgres) to run";

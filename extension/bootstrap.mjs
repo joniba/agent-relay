@@ -1,155 +1,78 @@
-// agent-relay — session bootstrap (composition/entry layer, NOT core).
+// agent-relay - session bootstrap (composition/entry layer, NOT core).
 //
 // Extracted from extension.mjs so the boot sequence is unit-testable with
 // injected fakes (no SDK, no DB): a fake transport whose init()/register() throws
-// (or hangs) exercises the retry/timeout path deterministically.
+// exercises the partial-boot cleanup path deterministically.
 //
 // Responsibilities (all entry-level wiring, no policy of its own):
 //   - resolve identity and stamp the display-only device name,
-//   - bring up the transport, retrying a transient/slow connect a few times (warn
-//     per attempt, error when giving up) before surfacing the failure. Each retry
-//     uses a FRESH transport: the Transport seam is init-once / stop-terminal, so a
-//     transport stopped after a failed attempt must never be reused (reusing one
-//     would "succeed" into an inert transport that never receives),
+//   - bring the transport online: init() then register(); if either throws, stop()
+//     the (possibly half-opened) transport before propagating, so a partly-inited
+//     transport never leaks,
 //   - build the runtime sink, construct the core relay, start receiving.
 //
-// There is deliberately NO fallback to a different substrate: when a connect
-// ultimately fails the error propagates so the entry marks the relay inactive.
-// Silently switching an explicit cross-machine session onto a single-machine local
-// store partitions the mesh (machines stop seeing each other) without telling the
-// user — so we surface the failure and let them choose to switch.
+// This layer holds NO retry/backoff/timeout policy: connect resilience is the
+// Transport's own concern (its init() owns any retry). There is deliberately no
+// fallback to a different substrate - a connect failure propagates so the entry
+// marks the relay inactive rather than silently partitioning the mesh.
 
 import { hostname } from "node:os";
 
 import { createRelay } from "./core/relay.mjs";
 import { createCopilotSink } from "./sinks/copilot.mjs";
 
-const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 /**
- * Start a relay session, retrying a transient/slow transport connect.
+ * Bring a fully-composed config online and start the relay.
  *
- * `createConfig` is a FACTORY: called once up front (to resolve identity and for
- * the first connect attempt) and again per retry, yielding a fresh transport each
- * time. This honors the init-once / stop-terminal Transport contract — a transport
- * stopped after a failed attempt is discarded, never reused.
- *
- * Retry semantics: with no `retry` it is a single attempt. With `retry`, the
- * connect (init -> register) is attempted up to `retry.attempts` times; each
- * attempt is bounded by `retry.attemptTimeoutMs`, non-final failures log a warning
- * and wait `retry.backoffsMs[i]` (via injected `sleep`), and the final failure logs
- * an error and PROPAGATES (no fallback — the entry surfaces it / goes inactive).
+ * Takes a PLAIN composed config (from `createConfig`), not a factory: identity is
+ * resolved, then the transport is brought up linearly (init -> register). On any
+ * failure during bring-up the transport is `stop()`ed (best-effort) and the error
+ * propagates - the caller surfaces it / goes inactive.
  *
  * @param {object} deps
  * @param {import('./seams/identity.mjs').SessionLike} deps.session
- * @param {() => {
+ * @param {{
  *   identity: import('./seams/identity.mjs').IdentityProvider,
  *   credentials: import('./seams/credentials.mjs').CredentialProvider,
  *   transport: import('./seams/transport.mjs').Transport,
  *   interceptors?: import('./seams/interceptor.mjs').Interceptor[],
- * }} deps.createConfig  Factory: a fresh config (incl. a fresh transport) per call.
- * @param {import('./seams/log.mjs').Logger} [deps.log]  Diagnostic logger.
- * @param {{ attempts?: number, attemptTimeoutMs?: number, backoffsMs?: number[] }} [deps.retry]
- * @param {(ms: number) => Promise<void>} [deps.sleep]  Backoff sleep (injectable for tests).
+ * }} deps.config  The composed seam bundle.
+ * @param {import('./seams/log.mjs').Logger} [deps.log]  Diagnostic logger (tee'd to the sink).
  * @returns {Promise<{
  *   relay: ReturnType<typeof createRelay>,
  *   self: import('./seams/identity.mjs').AgentIdentity,
  *   transport: import('./seams/transport.mjs').Transport,
  * }>}
  */
-export async function startRelaySession({ session, createConfig, log, retry, sleep = defaultSleep }) {
-  // Bootstrap's own diagnostics (boot / connect-retry) need a callable, so default a
-  // no-op here. The SINK, by contrast, receives the RAW `log`: when no logger is
-  // injected it must fall back to the session's own log (its documented default),
-  // NOT to this no-op — otherwise the core's send/recv/poison lines vanish.
-  const diag = log ?? (() => {});
-  const initial = createConfig();
-  const self = await initial.identity.resolve(session);
+export async function startRelaySession({ session, config, log }) {
+  const self = await config.identity.resolve(session);
   // Display-only device name (the machine this session runs on). Surfaced in the
   // cross-machine roster (e.g. "gull (my-laptop)") so a human can tell machines
   // apart; NEVER used for addressing or collision. A transport that doesn't store
   // it (the local SQLite default) simply ignores it.
   self.deviceName = process.env.AGENT_RELAY_HOST || hostname();
 
-  const { transport, interceptors } = await bringUpWithRetry(
-    { initial, createConfig, self },
-    { log: diag, retry, sleep },
-  );
+  try {
+    await config.transport.init({ self, credentials: config.credentials });
+    await config.transport.register(self);
+  } catch (err) {
+    // init() succeeded but register() failed (or init() itself failed) - release
+    // the (possibly half-opened) transport so it can't leak, then propagate.
+    await config.transport.stop().catch(() => {});
+    throw err;
+  }
 
   // The Sink is the runtime-specific seam: this Copilot entry wakes via
   // session.send(); an ACP entry would build an ACP sink here instead. The tee'd
   // `log` is injected so the core's send/recv/poison lines reach the rolling file;
   // when omitted, the sink falls back to `session.log`.
   const sink = createCopilotSink(session, log);
-  const relay = createRelay({ sink, self, transport, interceptors: interceptors ?? [] });
-  relay.start();
-  return { relay, self, transport };
-}
-
-/**
- * Bring a transport online, retrying a transient/slow connect per the policy. The
- * initial config is used for the first attempt; each retry builds a FRESH transport
- * via `createConfig` (init-once / stop-terminal — a stopped transport isn't reused).
- * On the final failure the error propagates (the caller surfaces it).
- *
- * @returns {Promise<{ transport: import('./seams/transport.mjs').Transport, interceptors: any[] }>}
- */
-async function bringUpWithRetry({ initial, createConfig, self }, { log, retry, sleep }) {
-  const attempts = Math.max(1, retry?.attempts ?? 1);
-  const timeoutMs = retry?.attemptTimeoutMs;
-  const backoffsMs = retry?.backoffsMs ?? [];
-
-  let lastErr;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    const config = attempt === 1 ? initial : createConfig(); // fresh transport per retry
-    const transport = config.transport;
-    try {
-      await withTimeout(connect(transport, { self, credentials: config.credentials }), timeoutMs, "connect");
-      log("agent-relay: transport ready");
-      return { transport, interceptors: config.interceptors };
-    } catch (err) {
-      lastErr = err;
-      // Terminal stop for THIS (discarded) transport instance; the next attempt
-      // builds a fresh one. A timed-out connect keeps running in the background but
-      // only touches this discarded instance, so it can't corrupt the next attempt.
-      await transport.stop().catch(() => {});
-      const isFinal = attempt === attempts;
-      if (isFinal) {
-        if (attempts > 1) {
-          log(
-            `agent-relay: transport connect failed after ${attempts} attempts — giving up (${err.message})`,
-            { level: "error" },
-          );
-        }
-        break;
-      }
-      log(
-        `agent-relay: transport connect failed (attempt ${attempt}/${attempts}) — retrying (${err.message})`,
-        { level: "warning" },
-      );
-      const backoff = backoffsMs[attempt - 1] ?? 0;
-      if (backoff > 0) await sleep(backoff);
-    }
-  }
-  throw lastErr;
-}
-
-async function connect(transport, ctx) {
-  await transport.init(ctx);
-  await transport.register(ctx.self);
-}
-
-/**
- * Reject if `promise` doesn't settle within `ms`. When `ms` is falsy, returns the
- * promise unchanged. The losing promise stays handled (no unhandled rejection); it
- * is NOT cancelled, but callers retry on a fresh transport, so a late-settling
- * connect only touches the already-discarded instance.
- */
-function withTimeout(promise, ms, label) {
-  if (!ms) return promise;
-  let timer;
-  const timeout = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  const relay = createRelay({
+    sink,
+    self,
+    transport: config.transport,
+    interceptors: config.interceptors ?? [],
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  relay.start();
+  return { relay, self, transport: config.transport };
 }

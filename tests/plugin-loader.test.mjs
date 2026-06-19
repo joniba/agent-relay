@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { loadExternalInterceptors } from "../extension/plugins/loader.mjs";
+import { loadPlugins } from "../extension/plugins/loader.mjs";
 
-// ── Test doubles ─────────────────────────────────────────────────────────────
+// -- Test doubles -------------------------------------------------------------
 
 // Fake importer keyed by module BASENAME; records the URLs it received. A map value:
-//   - { default: fn } → a normal module
-//   - Error           → simulates import() throwing (module-evaluation failure)
+//   - { default: fn } -> a normal module (factory in `default`)
+//   - Error           -> simulates import() throwing (module-evaluation failure)
 function fakeImporter(byBasename, received = []) {
   return async (url) => {
     received.push(url);
@@ -20,205 +20,320 @@ function fakeImporter(byBasename, received = []) {
 }
 
 const mod = (factory) => ({ default: factory });
-const passthrough = (tag) => () => ({ onReceive: (m, next) => next(m), _tag: tag });
+const interceptor = (tag) => ({ onReceive: (m, next) => next(m), _tag: tag });
+const files = (...names) => names.map((name) => ({ name, isDirectory: false }));
+const dirs = (...names) => names.map((name) => ({ name, isDirectory: true }));
+const noScan = { readEntries: () => [], readJson: () => ({}) };
 
-function recordingLog() {
-  const logs = [];
-  return { log: (msg, opts) => logs.push({ msg, opts }), logs };
-}
+// -- ordering / sources -------------------------------------------------------
 
-// ── env-var pointer source ────────────────────────────────────────────────────
-
-test("env pointer loads listed modules in listed order (not alphabetical)", async () => {
-  const importer = fakeImporter({ "a.mjs": mod(passthrough("a")), "b.mjs": mod(passthrough("b")) });
-  const out = await loadExternalInterceptors(
-    { env: { AGENT_RELAY_INTERCEPTORS: "/p/b.mjs,/p/a.mjs" }, dataDir: null },
-    { importer, readdir: () => [] },
+test("env paths load in listed order (not alphabetical)", async () => {
+  const importer = fakeImporter({
+    "b.mjs": mod(() => ({ interceptors: [interceptor("b")] })),
+    "a.mjs": mod(() => ({ interceptors: [interceptor("a")] })),
+  });
+  const reg = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/p/b.mjs,/p/a.mjs" }, dataDir: null },
+    { importer, ...noScan },
   );
-  assert.deepEqual(out.map((i) => i._tag), ["b", "a"]);
+  assert.deepEqual(reg.interceptors.map((i) => i._tag), ["b", "a"]);
+});
+
+test("env entries load BEFORE dir entries; dir entries are alphabetical; non-.mjs ignored", async () => {
+  const importer = fakeImporter({
+    "e.mjs": mod(() => ({ interceptors: [interceptor("env")] })),
+    "d1.mjs": mod(() => ({ interceptors: [interceptor("d1")] })),
+    "d2.mjs": mod(() => ({ interceptors: [interceptor("d2")] })),
+  });
+  const reg = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/x/e.mjs", AGENT_RELAY_PLUGIN_DIR: "/plugins" }, dataDir: null },
+    { importer, readEntries: () => files("d2.mjs", "d1.mjs", "notes.txt", "readme.md"), readJson: () => ({}) },
+  );
+  assert.deepEqual(reg.interceptors.map((i) => i._tag), ["env", "d1", "d2"]);
+});
+
+test("default plugin dir is <dataDir>/plugins when no override", async () => {
+  let scanned = null;
+  const importer = fakeImporter({ "a.mjs": mod(() => ({ interceptors: [interceptor("a")] })) });
+  await loadPlugins(
+    { env: {}, dataDir: "/data" },
+    { importer, readEntries: (dir) => { scanned = dir; return files("a.mjs"); }, readJson: () => ({}) },
+  );
+  assert.match(scanned, /[\\/]data[\\/]plugins$/);
 });
 
 test("the importer receives a file: URL (cross-platform path handling)", async () => {
   const received = [];
-  const importer = fakeImporter({ "rel.mjs": mod(passthrough()) }, received);
-  await loadExternalInterceptors(
-    { env: { AGENT_RELAY_INTERCEPTORS: "rel.mjs" }, dataDir: null }, // relative → resolved to absolute
-    { importer, readdir: () => [] },
+  const importer = fakeImporter({ "rel.mjs": mod(() => ({ interceptors: [interceptor()] })) }, received);
+  await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "rel.mjs" }, dataDir: null }, // relative -> resolved to absolute
+    { importer, ...noScan },
   );
   assert.equal(received.length, 1);
   assert.match(received[0], /^file:\/\//);
 });
 
-// ── plugin-dir source ──────────────────────────────────────────────────────────
+// -- package-folder resolution ------------------------------------------------
 
-test("plugin dir scans *.mjs alphabetically and ignores non-.mjs", async () => {
-  const importer = fakeImporter({ "a.mjs": mod(passthrough("a")), "b.mjs": mod(passthrough("b")) });
-  const out = await loadExternalInterceptors(
+test("package folders resolve the entry via agentRelay.entry -> main -> index.mjs", async () => {
+  const importer = fakeImporter({
+    "entry.mjs": mod(() => ({ interceptors: [interceptor("viaEntry")] })),
+    "main.mjs": mod(() => ({ interceptors: [interceptor("viaMain")] })),
+    "index.mjs": mod(() => ({ interceptors: [interceptor("viaIndex")] })),
+  });
+  const pkgs = {
+    pkgA: { agentRelay: { entry: "entry.mjs" }, main: "main.mjs" }, // agentRelay.entry wins
+    pkgB: { main: "main.mjs" }, // main wins
+    pkgC: {}, // default index.mjs
+  };
+  const reg = await loadPlugins(
     { env: { AGENT_RELAY_PLUGIN_DIR: "/plugins" }, dataDir: null },
-    { importer, readdir: () => ["b.mjs", "a.mjs", "notes.txt", "readme.md"] },
+    {
+      importer,
+      readEntries: () => dirs("pkgA", "pkgB", "pkgC"),
+      readJson: (p) => {
+        const seg = p.replace(/\\/g, "/").split("/");
+        return pkgs[seg[seg.length - 2]];
+      },
+    },
   );
-  assert.deepEqual(out.map((i) => i._tag), ["a", "b"]);
+  assert.deepEqual(reg.interceptors.map((i) => i._tag), ["viaEntry", "viaMain", "viaIndex"]);
 });
 
-test("env entries load BEFORE plugin-dir entries", async () => {
-  const importer = fakeImporter({ "e.mjs": mod(passthrough("env")), "d.mjs": mod(passthrough("dir")) });
-  const out = await loadExternalInterceptors(
-    { env: { AGENT_RELAY_INTERCEPTORS: "/x/e.mjs", AGENT_RELAY_PLUGIN_DIR: "/plugins" }, dataDir: null },
-    { importer, readdir: () => ["d.mjs"] },
+test("a subdirectory without package.json is ignored (not a plugin)", async () => {
+  const importer = fakeImporter({ "index.mjs": mod(() => ({ interceptors: [interceptor("x")] })) });
+  const reg = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGIN_DIR: "/plugins" }, dataDir: null },
+    {
+      importer,
+      readEntries: () => dirs("notapkg"),
+      readJson: () => { const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; },
+    },
   );
-  assert.deepEqual(out.map((i) => i._tag), ["env", "dir"]);
+  assert.deepEqual(reg.interceptors, []);
+  assert.equal(reg.transport, null);
 });
 
-test("default plugin dir is <dataDir>/plugins when no override", async () => {
-  let scanned = null;
-  const importer = fakeImporter({ "a.mjs": mod(passthrough("a")) });
-  await loadExternalInterceptors(
-    { env: {}, dataDir: "/data" },
-    { importer, readdir: (dir) => { scanned = dir; return ["a.mjs"]; } },
+test("a subdirectory whose package.json won't PARSE is fail-loud (broken plugin, not ignored)", async () => {
+  const importer = fakeImporter({});
+  await assert.rejects(
+    loadPlugins(
+      { env: { AGENT_RELAY_PLUGIN_DIR: "/plugins" }, dataDir: null },
+      {
+        importer,
+        readEntries: () => dirs("brokenpkg"),
+        // package.json EXISTS but is malformed JSON → SyntaxError (no .code) → must THROW.
+        readJson: () => { throw new SyntaxError("Unexpected token } in JSON"); },
+      },
+    ),
+    /plugin "brokenpkg".*package\.json is unreadable/,
   );
-  assert.match(scanned, /[\\/]data[\\/]plugins$/);
 });
 
-// ── contract validation ────────────────────────────────────────────────────────
-
-test("a non-function default export is skipped", async () => {
-  const { log, logs } = recordingLog();
-  const importer = fakeImporter({ "obj.mjs": { default: { onReceive() {} } } }); // object default ≠ factory
-  const out = await loadExternalInterceptors(
-    { env: { AGENT_RELAY_INTERCEPTORS: "/p/obj.mjs" }, dataDir: null, log },
-    { importer, readdir: () => [] },
+test("interceptors from all plugins aggregate in load order", async () => {
+  const importer = fakeImporter({
+    "a.mjs": mod(() => ({ interceptors: [interceptor("a1"), interceptor("a2")] })),
+    "b.mjs": mod(() => ({ interceptors: [interceptor("b1")] })),
+  });
+  const reg = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/p/a.mjs,/p/b.mjs" }, dataDir: null },
+    { importer, ...noScan },
   );
-  assert.equal(out.length, 0);
-  assert.ok(logs.some((l) => /skipped: obj\.mjs/.test(l.msg) && l.opts?.level === "warning"));
-});
-
-test("a result with a present-but-non-function hook is skipped", async () => {
-  const importer = fakeImporter({ "bad.mjs": mod(() => ({ onReceive: true })) });
-  const out = await loadExternalInterceptors(
-    { env: { AGENT_RELAY_INTERCEPTORS: "/p/bad.mjs" }, dataDir: null },
-    { importer, readdir: () => [] },
-  );
-  assert.equal(out.length, 0);
+  assert.deepEqual(reg.interceptors.map((i) => i._tag), ["a1", "a2", "b1"]);
 });
 
 test("a renderPrompt-only interceptor is accepted", async () => {
-  const importer = fakeImporter({ "r.mjs": mod(() => ({ renderPrompt: () => "x" })) });
-  const out = await loadExternalInterceptors(
-    { env: { AGENT_RELAY_INTERCEPTORS: "/p/r.mjs" }, dataDir: null },
-    { importer, readdir: () => [] },
+  const importer = fakeImporter({ "r.mjs": mod(() => ({ interceptors: [{ renderPrompt: () => "x" }] })) });
+  const reg = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/p/r.mjs" }, dataDir: null },
+    { importer, ...noScan },
   );
-  assert.equal(out.length, 1);
+  assert.equal(reg.interceptors.length, 1);
 });
 
-// ── safe-degrade (load-time) ────────────────────────────────────────────────────
-
-test("a module that throws on import is skipped; later modules still load", async () => {
-  const importer = fakeImporter({ "boom.mjs": new Error("evaluation blew up"), "ok.mjs": mod(passthrough("ok")) });
-  const out = await loadExternalInterceptors(
-    { env: { AGENT_RELAY_INTERCEPTORS: "/p/boom.mjs,/p/ok.mjs" }, dataDir: null },
-    { importer, readdir: () => [] },
-  );
-  assert.deepEqual(out.map((i) => i._tag), ["ok"]);
-});
-
-test("a factory that throws (sync) is skipped; later modules still load", async () => {
+test("transport, credentials, and identity are single-instance, last-loaded wins", async () => {
   const importer = fakeImporter({
-    "throw.mjs": mod(() => { throw new Error("factory boom"); }),
-    "ok.mjs": mod(passthrough("ok")),
+    "first.mjs": mod(() => ({
+      transport: { id: "t1", create: () => ({ _t: "t1" }) },
+      credentials: () => ({ async get() { return "c1"; } }),
+      identity: { resolve: async () => ({ name: "i1" }) },
+    })),
+    "second.mjs": mod(() => ({
+      transport: { id: "t2", create: () => ({ _t: "t2" }) },
+      credentials: () => ({ async get() { return "c2"; } }),
+      identity: { resolve: async () => ({ name: "i2" }) },
+    })),
   });
-  const out = await loadExternalInterceptors(
-    { env: { AGENT_RELAY_INTERCEPTORS: "/p/throw.mjs,/p/ok.mjs" }, dataDir: null },
-    { importer, readdir: () => [] },
+  const reg = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/p/first.mjs,/p/second.mjs" }, dataDir: null },
+    { importer, ...noScan },
   );
-  assert.deepEqual(out.map((i) => i._tag), ["ok"]);
+  assert.equal(reg.transport.id, "t2");
+  assert.equal(reg.transport.create()._t, "t2");
+  assert.equal(await reg.credentials.get(), "c2");
+  assert.equal((await reg.identity.resolve()).name, "i2");
 });
 
-test("an async factory that rejects is skipped; later modules still load", async () => {
+test("a credentials factory is invoked once and its provider (not the factory) is stored", async () => {
+  let calls = 0;
+  const provider = { async get() { return "tok"; } };
   const importer = fakeImporter({
-    "reject.mjs": mod(async () => { throw new Error("async boom"); }),
-    "ok.mjs": mod(passthrough("ok")),
+    "c.mjs": mod(() => ({ credentials: () => { calls += 1; return provider; } })),
   });
-  const out = await loadExternalInterceptors(
-    { env: { AGENT_RELAY_INTERCEPTORS: "/p/reject.mjs,/p/ok.mjs" }, dataDir: null },
-    { importer, readdir: () => [] },
+  const reg = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/p/c.mjs" }, dataDir: null },
+    { importer, ...noScan },
   );
-  assert.deepEqual(out.map((i) => i._tag), ["ok"]);
+  assert.equal(calls, 1);
+  assert.equal(reg.credentials, provider);
+  assert.equal(await reg.credentials.get(), "tok");
 });
 
-test("loadExternalInterceptors NEVER throws, even when every module fails", async () => {
-  const importer = fakeImporter({}); // every import → not found → throws
-  await assert.doesNotReject(() =>
-    loadExternalInterceptors(
-      { env: { AGENT_RELAY_INTERCEPTORS: "/p/x.mjs,/p/y.mjs" }, dataDir: null },
-      { importer, readdir: () => [] },
-    ),
+test("nothing configured -> empty registry", async () => {
+  const reg = await loadPlugins({ env: {}, dataDir: null }, { importer: fakeImporter({}), ...noScan });
+  assert.deepEqual(reg.interceptors, []);
+  assert.equal(reg.transport, null);
+  assert.equal(reg.credentials, null);
+  assert.equal(reg.identity, null);
+});
+
+test("a successfully loaded plugin is logged by name", async () => {
+  const logs = [];
+  const importer = fakeImporter({ "a.mjs": mod(() => ({ interceptors: [interceptor("a")] })) });
+  await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/p/a.mjs" }, dataDir: null, log: (m) => logs.push(m) },
+    { importer, ...noScan },
+  );
+  assert.ok(logs.some((m) => /plugin loaded: a\.mjs/.test(m)));
+});
+
+// -- fail-loud (each names the plugin) ----------------------------------------
+
+test("an import error throws, naming the plugin", async () => {
+  const importer = fakeImporter({ "boom.mjs": new Error("evaluation blew up") });
+  await assert.rejects(
+    () => loadPlugins({ env: { AGENT_RELAY_PLUGINS: "/p/boom.mjs" }, dataDir: null }, { importer, ...noScan }),
+    /plugin "boom\.mjs" failed to load: evaluation blew up/,
   );
 });
 
-// ── zero-config / dataDir / scan errors ──────────────────────────────────────────
-
-test("nothing configured → returns [] (zero-impact, today's behavior)", async () => {
-  const out = await loadExternalInterceptors(
-    { env: {}, dataDir: null },
-    { importer: fakeImporter({}), readdir: () => [] },
+test("a non-function default export throws", async () => {
+  const importer = fakeImporter({ "obj.mjs": { default: { interceptors: [] } } });
+  await assert.rejects(
+    () => loadPlugins({ env: { AGENT_RELAY_PLUGINS: "/p/obj.mjs" }, dataDir: null }, { importer, ...noScan }),
+    /plugin "obj\.mjs" failed to load: default export is not a factory function/,
   );
-  assert.deepEqual(out, []);
 });
 
-test("dataDir null → env paths still load, default plugin dir is skipped", async () => {
-  let readdirCalled = false;
-  const importer = fakeImporter({ "a.mjs": mod(passthrough("a")) });
-  const out = await loadExternalInterceptors(
-    { env: { AGENT_RELAY_INTERCEPTORS: "/p/a.mjs" }, dataDir: null },
-    { importer, readdir: () => { readdirCalled = true; return []; } },
+test("a factory that throws is surfaced, naming the plugin", async () => {
+  const importer = fakeImporter({ "throw.mjs": mod(() => { throw new Error("factory boom"); }) });
+  await assert.rejects(
+    () => loadPlugins({ env: { AGENT_RELAY_PLUGINS: "/p/throw.mjs" }, dataDir: null }, { importer, ...noScan }),
+    /plugin "throw\.mjs" failed to load: factory boom/,
   );
-  assert.equal(out.length, 1);
-  assert.equal(readdirCalled, false);
 });
 
-test("dataDir null + AGENT_RELAY_PLUGIN_DIR set → the override dir is still scanned", async () => {
-  let scanned = null;
-  const importer = fakeImporter({ "a.mjs": mod(passthrough("a")) });
-  const out = await loadExternalInterceptors(
-    { env: { AGENT_RELAY_PLUGIN_DIR: "/override" }, dataDir: null },
-    { importer, readdir: (dir) => { scanned = dir; return ["a.mjs"]; } },
+test("a factory returning undefined throws (invalid registration)", async () => {
+  const importer = fakeImporter({ "u.mjs": mod(() => undefined) });
+  await assert.rejects(
+    () => loadPlugins({ env: { AGENT_RELAY_PLUGINS: "/p/u.mjs" }, dataDir: null }, { importer, ...noScan }),
+    /plugin "u\.mjs" failed to load: registration is empty or not an object/,
   );
-  assert.match(scanned, /override/);
-  assert.equal(out.length, 1);
 });
 
-test("a missing plugin dir (ENOENT) → [] with no error", async () => {
-  const out = await loadExternalInterceptors(
-    { env: { AGENT_RELAY_PLUGIN_DIR: "/nope" }, dataDir: null },
-    {
-      importer: fakeImporter({}),
-      readdir: () => { const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; },
-    },
+test("a registration with no usable capability throws", async () => {
+  const importer = fakeImporter({ "empty.mjs": mod(() => ({})) });
+  await assert.rejects(
+    () => loadPlugins({ env: { AGENT_RELAY_PLUGINS: "/p/empty.mjs" }, dataDir: null }, { importer, ...noScan }),
+    /plugin "empty\.mjs" registered no usable capability/,
   );
-  assert.deepEqual(out, []);
 });
 
-test("a non-ENOENT scan error is logged + skipped; env plugins still load; never throws", async () => {
-  const { log, logs } = recordingLog();
-  const importer = fakeImporter({ "a.mjs": mod(passthrough("a")) });
-  const out = await loadExternalInterceptors(
-    { env: { AGENT_RELAY_INTERCEPTORS: "/p/a.mjs", AGENT_RELAY_PLUGIN_DIR: "/locked" }, dataDir: null, log },
-    {
-      importer,
-      readdir: () => { const e = new Error("EACCES"); e.code = "EACCES"; throw e; },
-    },
+test("a malformed interceptor (no function hook) throws", async () => {
+  const importer = fakeImporter({ "badint.mjs": mod(() => ({ interceptors: [{ onReceive: true }] })) });
+  await assert.rejects(
+    () => loadPlugins({ env: { AGENT_RELAY_PLUGINS: "/p/badint.mjs" }, dataDir: null }, { importer, ...noScan }),
+    /plugin "badint\.mjs" failed to load: interceptor #0/,
   );
-  assert.deepEqual(out.map((i) => i._tag), ["a"]);
-  assert.ok(logs.some((l) => /scan failed/.test(l.msg) && l.opts?.level === "warning"));
 });
 
-test("loaded/skipped activity is logged as metadata (ids/names only)", async () => {
-  const { log, logs } = recordingLog();
-  const importer = fakeImporter({ "a.mjs": mod(passthrough("a")), "bad.mjs": new Error("nope") });
-  await loadExternalInterceptors(
-    { env: { AGENT_RELAY_INTERCEPTORS: "/p/a.mjs,/p/bad.mjs" }, dataDir: null, log },
-    { importer, readdir: () => [] },
+test("a transport without create() throws", async () => {
+  const importer = fakeImporter({ "badt.mjs": mod(() => ({ transport: { id: "x" } })) });
+  await assert.rejects(
+    () => loadPlugins({ env: { AGENT_RELAY_PLUGINS: "/p/badt.mjs" }, dataDir: null }, { importer, ...noScan }),
+    /plugin "badt\.mjs" failed to load: transport must be an object with a create\(\) function/,
   );
-  assert.ok(logs.some((l) => /plugin loaded: a\.mjs/.test(l.msg)));
-  assert.ok(logs.some((l) => /plugin skipped: bad\.mjs/.test(l.msg) && l.opts?.level === "warning"));
+});
+
+test("credentials that is not a function throws", async () => {
+  const importer = fakeImporter({ "badc.mjs": mod(() => ({ credentials: { get: async () => null } })) });
+  await assert.rejects(
+    () => loadPlugins({ env: { AGENT_RELAY_PLUGINS: "/p/badc.mjs" }, dataDir: null }, { importer, ...noScan }),
+    /plugin "badc\.mjs" failed to load: credentials must be a function/,
+  );
+});
+
+test("a credentials factory that throws is surfaced, naming the plugin", async () => {
+  const importer = fakeImporter({ "cf.mjs": mod(() => ({ credentials: () => { throw new Error("kaboom"); } })) });
+  await assert.rejects(
+    () => loadPlugins({ env: { AGENT_RELAY_PLUGINS: "/p/cf.mjs" }, dataDir: null }, { importer, ...noScan }),
+    /plugin "cf\.mjs" failed to load: credentials factory threw: kaboom/,
+  );
+});
+
+test("a credentials provider without get() throws", async () => {
+  const importer = fakeImporter({ "cp.mjs": mod(() => ({ credentials: () => ({ nope: true }) })) });
+  await assert.rejects(
+    () => loadPlugins({ env: { AGENT_RELAY_PLUGINS: "/p/cp.mjs" }, dataDir: null }, { importer, ...noScan }),
+    /plugin "cp\.mjs" failed to load: credentials provider has no get\(\) function/,
+  );
+});
+
+test("identity without resolve() throws", async () => {
+  const importer = fakeImporter({ "badi.mjs": mod(() => ({ identity: {} })) });
+  await assert.rejects(
+    () => loadPlugins({ env: { AGENT_RELAY_PLUGINS: "/p/badi.mjs" }, dataDir: null }, { importer, ...noScan }),
+    /plugin "badi\.mjs" failed to load: identity must be an object with a resolve\(\) function/,
+  );
+});
+
+// -- all-or-nothing -----------------------------------------------------------
+
+test("all-or-nothing: a valid transport + a malformed interceptor fails the whole plugin", async () => {
+  const importer = fakeImporter({
+    "mixed.mjs": mod(() => ({
+      transport: { id: "t", create: () => ({ _t: "t" }) }, // valid on its own
+      interceptors: [{ not: "a hook" }], // but this is malformed
+    })),
+  });
+  await assert.rejects(
+    () => loadPlugins({ env: { AGENT_RELAY_PLUGINS: "/p/mixed.mjs" }, dataDir: null }, { importer, ...noScan }),
+    /plugin "mixed\.mjs" failed to load: interceptor #0/,
+  );
+});
+
+// -- dir failure policy -------------------------------------------------------
+
+test("a missing plugin dir (ENOENT) does not throw; env paths still load", async () => {
+  const importer = fakeImporter({ "a.mjs": mod(() => ({ interceptors: [interceptor("a")] })) });
+  const reg = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/p/a.mjs", AGENT_RELAY_PLUGIN_DIR: "/nope" }, dataDir: null },
+    { importer, readEntries: () => { const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; }, readJson: () => ({}) },
+  );
+  assert.deepEqual(reg.interceptors.map((i) => i._tag), ["a"]);
+});
+
+test("a plugin dir that exists but is unreadable throws", async () => {
+  await assert.rejects(
+    () =>
+      loadPlugins(
+        { env: { AGENT_RELAY_PLUGIN_DIR: "/locked" }, dataDir: null },
+        {
+          importer: fakeImporter({}),
+          readEntries: () => { const e = new Error("EACCES: permission denied"); e.code = "EACCES"; throw e; },
+          readJson: () => ({}),
+        },
+      ),
+    /cannot read plugin dir .*locked.*EACCES/,
+  );
 });

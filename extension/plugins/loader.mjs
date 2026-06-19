@@ -1,112 +1,232 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve, join, basename } from "node:path";
 import { pathToFileURL } from "node:url";
 
 /**
- * Load EXTERNAL interceptor modules at startup and return them as an `Interceptor[]`
- * to compose into the relay's interceptor chain. This is the public extension point:
- * guardrails (or any middleware) live in user-controlled modules — a separate repo, a
- * plugin folder — instead of being baked into this repo.
+ * Load plugins at startup and fold them into a single aggregated **registry** —
+ * the one path by which any core seam (transport / credentials / identity /
+ * interceptors) can come from outside this repo.
  *
- * Two sources, loaded **in order**:
- *   1. `env.AGENT_RELAY_INTERCEPTORS` — a **comma-separated** list of module paths
- *      (absolute, or relative to `process.cwd()`), loaded in listed order.
- *   2. The **plugin directory** — `env.AGENT_RELAY_PLUGIN_DIR`, else (only when a
- *      `dataDir` is available) `<dataDir>/plugins` — scanned for top-level `*.mjs`
- *      files, **alphabetically**.
+ * A plugin DEFAULT-exports a factory `(ctx) => Registration`, where
+ * `ctx = { env, dataDir, log }`. The returned **Registration** may declare any
+ * subset of four capabilities, each an implementation of an existing core seam:
  *
- * **Contract:** each module DEFAULT-exports a factory `(ctx) => Interceptor` (it may be
- * async). `ctx = { env, dataDir, log }` (no `self` — identity isn't resolved yet). The
- * result must be an object with at least one **function-valued** hook
- * (`onSend`/`onReceive`/`renderPrompt`); otherwise it is skipped.
+ * ```js
+ * {
+ *   interceptors: [ { onSend?, onReceive?, renderPrompt? } ],  // aggregate — ALL plugins chained, in load order
+ *   transport:    { id?, create: (ctx) => Transport },         // single-instance, LAST-loaded wins
+ *   credentials:  () => CredentialProvider,                    // single-instance, LAST-loaded wins
+ *   identity:     { resolve(session) },                        // single-instance, LAST-loaded wins
+ * }
+ * ```
  *
- * **Safe-degrade (load-time).** Every module is isolated: any import / factory /
- * validation failure is skipped + logged (metadata) and loading continues. This function
- * NEVER throws, so a broken plugin can't crash or block startup. Plugins are TRUSTED user
- * code — a plugin that *hangs* or CPU-loops is out of scope (no timeout/isolation).
+ * **Sources, loaded in order:**
+ *   1. `env.AGENT_RELAY_PLUGINS` — a comma-separated list of module paths
+ *      (absolute, or resolved against `process.cwd()`). A SECONDARY dev
+ *      convenience for pointing at an un-copied repo.
+ *   2. The plugin DIRECTORY (primary): `env.AGENT_RELAY_PLUGIN_DIR`, else (only
+ *      when `dataDir` is set) `<dataDir>/plugins`. Entries are taken in
+ *      alphabetical order: a top-level `*.mjs` file is imported directly; a
+ *      subdirectory with a `package.json` resolves its entry as
+ *      `agentRelay.entry` -> `main` -> `index.mjs` and is imported by absolute
+ *      `file:` URL (so a deps-carrying plugin resolves against its own
+ *      `node_modules`). A subdirectory without `package.json`, or any non-`.mjs`
+ *      file, is ignored.
+ *
+ * **Fail-loud + all-or-nothing.** The opposite of a best-effort loader: ANY
+ * problem with ANY plugin - import error, missing/invalid factory, an empty or
+ * malformed registration, any invalid capability within it - makes this function
+ * **throw immediately, naming the plugin**. There is no skipping and no
+ * best-effort tier. A plugin is folded into the registry only after its WHOLE
+ * registration validates (so a plugin can never load "half" of itself). A
+ * MISSING plugin dir is the normal zero-plugin case (returns the empty registry);
+ * a dir that exists but is UNREADABLE is a failure and throws.
  *
  * @param {{ env?: NodeJS.ProcessEnv, dataDir?: string|null, log?: import('../seams/log.mjs').Logger }} [ctx]
- * @param {{ importer?: (url: string) => Promise<any>, readdir?: (dir: string) => string[] }} [deps]
- *   DI seams for tests (default: real dynamic `import()` + `fs.readdirSync`).
- * @returns {Promise<import('../seams/interceptor.mjs').Interceptor[]>}
+ * @param {{
+ *   importer?: (url: string) => Promise<any>,
+ *   readEntries?: (dir: string) => Array<{ name: string, isDirectory: boolean }>,
+ *   readJson?: (path: string) => any,
+ * }} [deps]  DI seams for tests (default: real dynamic `import()` + `fs`).
+ * @returns {Promise<{
+ *   interceptors: import('../seams/interceptor.mjs').Interceptor[],
+ *   transport: { id?: string, create: (ctx: any) => import('../seams/transport.mjs').Transport } | null,
+ *   credentials: import('../seams/credentials.mjs').CredentialProvider | null,
+ *   identity: import('../seams/identity.mjs').IdentityProvider | null,
+ * }>}
  */
-export async function loadExternalInterceptors(ctx = {}, deps = {}) {
+export async function loadPlugins(ctx = {}, deps = {}) {
   const env = ctx.env ?? process.env;
   const dataDir = ctx.dataDir ?? null;
   const log = typeof ctx.log === "function" ? ctx.log : () => {};
   const importer = deps.importer ?? ((url) => import(url));
-  const readdir = deps.readdir ?? readdirSync;
+  const readEntries = deps.readEntries ?? defaultReadEntries;
+  const readJson = deps.readJson ?? defaultReadJson;
 
   const pluginCtx = { env, dataDir, log };
-  const interceptors = [];
-  for (const absPath of resolveSpecs(env, dataDir, log, readdir)) {
-    const loaded = await loadOne(absPath, pluginCtx, importer, log);
-    if (loaded) interceptors.push(loaded);
+  const registry = { interceptors: [], transport: null, credentials: null, identity: null };
+
+  for (const { name, entryPath } of resolveSources(env, dataDir, readEntries, readJson)) {
+    await loadOne({ name, entryPath, pluginCtx, importer, log, registry });
   }
-  if (interceptors.length) log(`external interceptors active: ${interceptors.length}`);
-  return interceptors;
+  return registry;
 }
 
-/** Ordered list of ABSOLUTE module paths to load: env-var entries first, then dir entries. */
-function resolveSpecs(env, dataDir, log, readdir) {
-  const specs = [];
+/**
+ * Ordered list of plugins to load: env-var entries first (in listed order), then
+ * plugin-dir entries (alphabetical). Each is `{ name, entryPath }` where `name`
+ * labels the plugin in logs/errors and `entryPath` is its absolute module path.
+ *
+ * Dir-failure policy: a MISSING dir contributes nothing (zero-plugin norm); a dir
+ * that exists but is unreadable THROWS (fail loud).
+ */
+function resolveSources(env, dataDir, readEntries, readJson) {
+  const sources = [];
 
-  // 1) Explicit env-var paths (comma-separated), in listed order.
-  for (const p of (env.AGENT_RELAY_INTERCEPTORS ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
-    specs.push(isAbsolute(p) ? p : resolve(process.cwd(), p));
+  // 1) Explicit env-var paths (comma-separated), in listed order - dev convenience.
+  for (const p of (env.AGENT_RELAY_PLUGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    const entryPath = isAbsolute(p) ? p : resolve(process.cwd(), p);
+    sources.push({ name: basename(entryPath), entryPath });
   }
 
-  // 2) Plugin directory: explicit override, else <dataDir>/plugins (only when available).
+  // 2) Plugin directory (primary): explicit override, else <dataDir>/plugins.
   const dir = env.AGENT_RELAY_PLUGIN_DIR
     ? resolve(process.cwd(), env.AGENT_RELAY_PLUGIN_DIR)
     : dataDir
       ? join(dataDir, "plugins")
       : null;
   if (dir) {
-    let names = [];
+    let entries;
     try {
-      names = readdir(dir);
+      entries = readEntries(dir);
     } catch (err) {
-      // A MISSING dir is the zero-config norm → silent empty. Any OTHER scan error is
-      // logged + skipped. Either way, never throw.
-      if (!isMissingDir(err)) {
-        log(`plugin dir scan failed: ${dir} (${err && err.message})`, { level: "warning" });
-      }
-      names = [];
+      if (isMissingDir(err)) return sources; // missing dir -> contributes nothing
+      throw new Error(`agent-relay: cannot read plugin dir ${dir}: ${(err && err.message) || err}`);
     }
-    for (const name of names.filter((n) => n.endsWith(".mjs")).sort()) {
-      specs.push(join(dir, name));
+    for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      const resolved = resolveDirEntry(dir, entry, readJson);
+      if (resolved) sources.push(resolved);
     }
   }
 
-  return specs;
+  return sources;
+}
+
+/**
+ * Resolve a single plugin-dir entry to `{ name, entryPath }`, or null if the
+ * entry is not a plugin. A subdirectory is a packaged plugin only if it has a
+ * readable `package.json`; a top-level file is a plugin only if it ends in `.mjs`.
+ */
+function resolveDirEntry(dir, entry, readJson) {
+  if (entry.isDirectory) {
+    let pkg;
+    try {
+      pkg = readJson(join(dir, entry.name, "package.json"));
+    } catch (err) {
+      // No package.json at all -> this subdir simply isn't a plugin (ignore it).
+      if (isMissingDir(err)) return null;
+      // A package.json that EXISTS but won't read/parse is a BROKEN plugin install
+      // -> fail loud (not silently ignored), consistent with the loader's contract.
+      throw fail(entry.name, `package.json is unreadable: ${(err && err.message) || err}`);
+    }
+    const entryFile = (pkg && pkg.agentRelay && pkg.agentRelay.entry) || (pkg && pkg.main) || "index.mjs";
+    return { name: entry.name, entryPath: join(dir, entry.name, entryFile) };
+  }
+  if (entry.name.endsWith(".mjs")) {
+    return { name: entry.name, entryPath: join(dir, entry.name) };
+  }
+  return null; // a non-.mjs top-level file -> not a plugin
 }
 
 function isMissingDir(err) {
   return !!err && (err.code === "ENOENT" || err.code === "ENOTDIR");
 }
 
-/** Load + validate ONE module; return the Interceptor or null (skipped). Never throws. */
-async function loadOne(absPath, pluginCtx, importer, log) {
-  const name = basename(absPath);
+/**
+ * Import + validate ONE plugin and fold it into the registry. THROWS (naming the
+ * plugin) on any failure - there is no skip path.
+ */
+async function loadOne({ name, entryPath, pluginCtx, importer, log, registry }) {
+  let registration;
   try {
-    const mod = await importer(pathToFileURL(absPath).href);
+    const mod = await importer(pathToFileURL(entryPath).href);
     const factory = mod && mod.default;
-    if (typeof factory !== "function") {
-      log(`plugin skipped: ${name} (no default-export factory)`, { level: "warning" });
-      return null;
-    }
-    const result = await factory(pluginCtx);
-    if (!isInterceptor(result)) {
-      log(`plugin skipped: ${name} (no onSend/onReceive/renderPrompt function)`, { level: "warning" });
-      return null;
-    }
-    log(`plugin loaded: ${name}`);
-    return result;
+    if (typeof factory !== "function") throw new Error("default export is not a factory function");
+    registration = await factory(pluginCtx);
   } catch (err) {
-    log(`plugin skipped: ${name} (${(err && err.message) || err})`, { level: "warning" });
-    return null;
+    throw fail(name, (err && err.message) || String(err));
   }
+  foldRegistration({ name, registration, registry });
+  log(`plugin loaded: ${name}`);
+}
+
+/**
+ * Validate a plugin's Registration in FULL, then commit it to the registry
+ * (interceptors aggregate; transport/credentials/identity are last-wins). Any bad
+ * field throws before ANY mutation, so a plugin is all-or-nothing.
+ */
+function foldRegistration({ name, registration, registry }) {
+  if (registration == null || typeof registration !== "object" || Array.isArray(registration)) {
+    throw fail(name, "registration is empty or not an object");
+  }
+
+  const staged = { interceptors: [], transport: undefined, credentials: undefined, identity: undefined };
+  let usable = false;
+
+  if (registration.interceptors !== undefined) {
+    if (!Array.isArray(registration.interceptors)) throw fail(name, "interceptors must be an array");
+    registration.interceptors.forEach((it, i) => {
+      if (!isInterceptor(it)) {
+        throw fail(name, `interceptor #${i} has no onSend/onReceive/renderPrompt function`);
+      }
+      staged.interceptors.push(it);
+    });
+    if (staged.interceptors.length) usable = true;
+  }
+
+  if (registration.transport !== undefined) {
+    const t = registration.transport;
+    if (t == null || typeof t !== "object" || Array.isArray(t) || typeof t.create !== "function") {
+      throw fail(name, "transport must be an object with a create() function");
+    }
+    if (t.id !== undefined && typeof t.id !== "string") throw fail(name, "transport.id must be a string");
+    staged.transport = t;
+    usable = true;
+  }
+
+  if (registration.credentials !== undefined) {
+    if (typeof registration.credentials !== "function") {
+      throw fail(name, "credentials must be a function returning a CredentialProvider");
+    }
+    let provider;
+    try {
+      provider = registration.credentials();
+    } catch (err) {
+      throw fail(name, `credentials factory threw: ${(err && err.message) || err}`);
+    }
+    if (provider == null || typeof provider !== "object" || typeof provider.get !== "function") {
+      throw fail(name, "credentials provider has no get() function");
+    }
+    staged.credentials = provider;
+    usable = true;
+  }
+
+  if (registration.identity !== undefined) {
+    const id = registration.identity;
+    if (id == null || typeof id !== "object" || typeof id.resolve !== "function") {
+      throw fail(name, "identity must be an object with a resolve() function");
+    }
+    staged.identity = id;
+    usable = true;
+  }
+
+  if (!usable) throw fail(name, null); // declared no usable capability
+
+  // All validated - commit. (Done last so a later throw leaves the registry untouched.)
+  for (const it of staged.interceptors) registry.interceptors.push(it);
+  if (staged.transport !== undefined) registry.transport = staged.transport;
+  if (staged.credentials !== undefined) registry.credentials = staged.credentials;
+  if (staged.identity !== undefined) registry.identity = staged.identity;
 }
 
 /** A valid interceptor is an object with at least one FUNCTION-valued lifecycle hook. */
@@ -118,4 +238,21 @@ function isInterceptor(x) {
       typeof x.onReceive === "function" ||
       typeof x.renderPrompt === "function")
   );
+}
+
+/** Build a fail-loud Error that names the plugin. `reason == null` -> no-capability. */
+function fail(name, reason) {
+  return new Error(
+    reason == null
+      ? `agent-relay: plugin "${name}" registered no usable capability`
+      : `agent-relay: plugin "${name}" failed to load: ${reason}`,
+  );
+}
+
+function defaultReadEntries(dir) {
+  return readdirSync(dir, { withFileTypes: true }).map((d) => ({ name: d.name, isDirectory: d.isDirectory() }));
+}
+
+function defaultReadJson(path) {
+  return JSON.parse(readFileSync(path, "utf8"));
 }

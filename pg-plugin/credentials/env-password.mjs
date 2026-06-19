@@ -12,7 +12,7 @@
  * @param {NodeJS.ProcessEnv} [opts.env]   Defaults to `process.env`.
  * @param {string} [opts.varName]          Env var holding the password.
  *   Default `AGENT_RELAY_PG_PASSWORD`.
- * @returns {import('../seams/credentials.mjs').CredentialProvider}
+ * @returns {CredentialProvider}
  */
 export function createEnvPasswordCredentials({ env = process.env, varName = "AGENT_RELAY_PG_PASSWORD" } = {}) {
   return {
