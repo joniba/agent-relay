@@ -27,7 +27,7 @@
   PostgreSQL Flexible Server name (must be GLOBALLY UNIQUE, lowercase). Required.
 
 .PARAMETER Location
-  Azure region. Default: israelcentral (lowest latency from IL; proven available).
+  Azure region. Default: eastus. Override with any Azure region near you.
 
 .PARAMETER Database
   Application database name. Default: agentrelay.
@@ -46,7 +46,7 @@
 param(
     [string]$ResourceGroup = "rg-agent-relay",
     [Parameter(Mandatory = $true)][string]$ServerName,
-    [string]$Location = "israelcentral",
+    [string]$Location = "eastus",
     [string]$Database = "agentrelay",
     [string]$Tier = "Burstable",
     [string]$Sku = "Standard_B1ms",

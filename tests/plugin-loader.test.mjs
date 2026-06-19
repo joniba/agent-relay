@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { loadPlugins } from "../extension/plugins/loader.mjs";
+import { loadPlugins } from "../extension/plugin-loader.mjs";
 
 // -- Test doubles -------------------------------------------------------------
 
@@ -52,14 +52,19 @@ test("env entries load BEFORE dir entries; dir entries are alphabetical; non-.mj
   assert.deepEqual(reg.interceptors.map((i) => i._tag), ["env", "d1", "d2"]);
 });
 
-test("default plugin dir is <dataDir>/plugins when no override", async () => {
+test("default plugin dir is <extension-dir>/plugins (the extension's OWN folder), not <dataDir>", async () => {
   let scanned = null;
   const importer = fakeImporter({ "a.mjs": mod(() => ({ interceptors: [interceptor("a")] })) });
   await loadPlugins(
-    { env: {}, dataDir: "/data" },
-    { importer, readEntries: (dir) => { scanned = dir; return files("a.mjs"); }, readJson: () => ({}) },
+    { env: {}, dataDir: "/data" }, // dataDir is for plugin STATE, not plugin location
+    {
+      importer,
+      baseDir: "/ext", // stand-in for the installed extension root
+      readEntries: (dir) => { scanned = dir; return files("a.mjs"); },
+      readJson: () => ({}),
+    },
   );
-  assert.match(scanned, /[\\/]data[\\/]plugins$/);
+  assert.match(scanned, /[\\/]ext[\\/]plugins$/);
 });
 
 test("the importer receives a file: URL (cross-platform path handling)", async () => {

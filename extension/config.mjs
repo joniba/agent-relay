@@ -6,7 +6,7 @@ import { createNoneCredentials } from "./credentials/none.mjs";
 import { createSqlitePollTransport } from "./transports/sqlite-poll.mjs";
 import { dataFile, ensureDataDir } from "./storage/paths.mjs";
 import { migrateLocalDbOnce } from "./storage/local-db.mjs";
-import { loadPlugins } from "./plugins/loader.mjs";
+import { loadPlugins } from "./plugin-loader.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -16,7 +16,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * registry over the zero-infra local default.
  *
  * Every seam - transport, credentials, identity, and the interceptor chain - may
- * now come from a plugin (see `plugins/loader.mjs`). With NO plugins this returns
+ * now come from a plugin (see `plugin-loader.mjs`). With NO plugins this returns
  * the dependency-free local default: SQLite-poll transport (DB in the canonical
  * per-user data dir; override with AGENT_RELAY_DB or AGENT_RELAY_DATA_DIR), no
  * credentials, the local wordlist-alias identity, and an empty interceptor chain.
@@ -33,7 +33,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *
  * @param {object} [opts]
  * @param {NodeJS.ProcessEnv} [opts.env]   Environment to read plugin config from. Defaults to `process.env`.
- * @param {string|null} [opts.dataDir]     Canonical data dir; its `plugins/` subdir is scanned. May be null.
+ * @param {string|null} [opts.dataDir]     Canonical per-user STATE dir (DB/logs), handed to plugins for their own state. Plugins are NOT located here — they live in the extension's own `plugins/` folder. May be null.
  * @param {import('./seams/log.mjs').Logger} [opts.log]   Diagnostic logger handed to plugins/transports. No-op by default.
  * @returns {Promise<{
  *   identity: import('./seams/identity.mjs').IdentityProvider,

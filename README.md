@@ -15,49 +15,46 @@ A tiny core plus five pluggable seams (**Transport**, **Identity**, **Credential
 
 ## Install
 
-Clone the repo and run the install script — it **copies** `extension/` (and its `node_modules`, if
-present) into `~/.copilot/extensions/agent-relay/` and verifies the entry. It does **not** launch
-Copilot.
-
-> **Dependencies are opt-in.** The single-machine default uses Node's built-in SQLite and needs
-> **no packages** — just clone and install. Only the **cross-machine** transport needs `pg` plus the
-> Azure credential lib (`@azure/identity`), both loaded lazily. The PowerShell **cross-machine setup
-> below runs `npm install` for you**; you only need to run it yourself for the bash installer or a
-> manual install. (See *Cross-machine messaging* for the one-command setup.)
-
-```powershell
-# Windows / PowerShell
-git clone https://github.com/joniba/agent-relay.git
-cd agent-relay
-# npm install        # ONLY for cross-machine (fetches pg + Azure cred deps) — skip for local-only
-pwsh scripts/install.ps1                        # self-contained copy into ~/.copilot/extensions
-#   ...-Link   dev junction to this clone instead (updates via `git pull`)
-```
+**Quickest — one command, no clone:**
 
 ```bash
-# macOS / Linux
-git clone https://github.com/joniba/agent-relay.git
-cd agent-relay
-# npm install        # ONLY for cross-machine (fetches pg + Azure cred deps) — skip for local-only
-scripts/install.sh                             # self-contained copy into ~/.copilot/extensions
-#   --link   dev symlink to this clone instead (updates via `git pull`)
+npx --yes github:joniba/agent-relay
 ```
 
-**Upgrading:** `git pull` then re-run the install script. The copy refreshes the code in place and
-**preserves your runtime DB** (`*.db*` is never touched), so you can upgrade **while sessions are
-running** — no need to close anything.
+It copies the extension into `<COPILOT_HOME>/extensions/agent-relay/` (default `~/.copilot/`), points
+Copilot's statusline at agent-relay (replacing any existing one, unless `--no-statusline` is passed), and
+verifies the entry. It does **not** launch Copilot. Core is **local-only and
+dependency-free** (built-in `node:sqlite`) — there is nothing to `npm install`.
+
+**From a local clone** (contributors, or to install a checked-out version):
+
+```bash
+git clone https://github.com/joniba/agent-relay.git
+cd agent-relay
+node scripts/install.mjs            # same installer; pass --no-statusline to skip the statusline wiring
+```
+
+**Upgrading:** re-run the same command — with `npx` that fetches the current GitHub version; from a clone,
+update or switch your checkout first, then re-run `node scripts/install.mjs`. The copy is a non-purging
+delta-copy — it refreshes the code in place and **never deletes** your runtime DB (`*.db*`) or any installed
+plugins (`plugins/<name>/`), so you can upgrade **while sessions are running**.
+
+**Cross-machine messaging** is a separate drop-in plugin; installing it brings core along:
+
+```bash
+npx --yes github:joniba/agent-relay-pg-plugin
+```
 
 <details>
 <summary>Manual install (no script)</summary>
 
-Copy the extension so the entry lives at `~/.copilot/extensions/agent-relay/extension.mjs`:
+Copy the extension into `<COPILOT_HOME>/extensions/agent-relay/` (or `~/.copilot/extensions/agent-relay/`
+if `COPILOT_HOME` is unset) so the entry lives at `…/agent-relay/extension.mjs`:
 
 ```powershell
 $dest = "$env:USERPROFILE\.copilot\extensions\agent-relay"
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Copy-Item -Recurse -Force .\extension\* $dest
-# Cross-machine only: also copy node_modules so `pg` resolves at the destination
-# Copy-Item -Recurse -Force .\node_modules $dest\node_modules
 ```
 </details>
 
@@ -67,7 +64,7 @@ Then start Copilot with extensions enabled:
 copilot --experimental
 ```
 
-On load you'll see a timeline entry like `agent-relay: registered as "<name>" — ready`,
+On load you'll see a terminal line like `🌐 agent-relay: connected to local transport as [<alias>]`,
 and the `send_message` / `list_relay_agents` tools become available.
 
 ## Identity (who you are in the mesh)
@@ -85,8 +82,7 @@ copilot --experimental
 ```
 
 The alias also renders below your prompt as `[stone]` via the Copilot **statusline**
-(wired up by `scripts/install.ps1` / `scripts/install.sh`; pass `-NoStatusline` /
-`--no-statusline` to skip).
+(wired up by the installer; pass `--no-statusline` to skip).
 
 ## Usage
 
@@ -184,10 +180,12 @@ AGENT_RELAY_PG_DB=agentrelay
 # AZURE_CONFIG_DIR=C:\path\to\.azure-relay   # optional: isolate the az profile used for the token
 ```
 
-**Then run the installer:**
+**Then install the cross-machine plugin** — it installs core and runs the Azure preflight. It does **not**
+launch Copilot; start it in the Run step below. (The full provisioning walkthrough is moving to the
+plugin's own README; cross-machine support now lives in the separate `agent-relay-pg-plugin`.)
 
-```powershell
-pwsh scripts/install.ps1        # auto-detects cross-machine from the .env
+```bash
+npx --yes github:joniba/agent-relay-pg-plugin
 ```
 
 Because the `.env` selects Postgres, the installer runs a **setup preflight** and does everything
@@ -233,7 +231,7 @@ $env:AGENT_RELAY_PG_HOST   = 'pg-agent-relay-<unique>.postgres.database.azure.co
 $env:AGENT_RELAY_PG_USER   = '<your-entra-admin-upn>'
 $env:AGENT_RELAY_PG_DB     = 'agentrelay'
 # $env:AZURE_CONFIG_DIR    = '<dir>'   # optional: isolate the az profile
-pwsh scripts/install.ps1 -CrossMachine
+npx --yes github:joniba/agent-relay-pg-plugin
 ```
 </details>
 
@@ -302,53 +300,60 @@ changes (OCP):
   to interactive Copilot user-sessions — an **ACP-managed session** (or any runtime) is a drop-in
   `sinks/<runtime>.mjs` paired with a matching entry, with no core change.
 
-### External interceptors (plugins)
+### External plugins
 
-Interceptors can be loaded from **your own modules** at startup — so a guardrail (or any
-middleware) lives in a separate, even **private**, repo or a local folder, never in this
-one. Two sources, loaded in order (env entries first, then the directory, alphabetically):
+A plugin loads **your own modules** at startup and can supply ANY core seam — interceptors (guardrails /
+middleware), or even the transport, credentials, or identity — so a capability can live in a separate,
+even **private**, repo or a local folder, never in this one. Two sources, loaded in order (env entries
+first, then the directory, alphabetically):
 
 | Source | How |
 |---|---|
-| **Env-var pointer** | `AGENT_RELAY_INTERCEPTORS` = a **comma-separated** list of module paths (**absolute recommended** — a session's cwd isn't obvious; relative is resolved against it), loaded in listed order. |
-| **Plugin directory** | every top-level `*.mjs` in `AGENT_RELAY_PLUGIN_DIR` (default `<data-dir>/plugins`, alongside the DB + logs, so it survives reinstalls). |
+| **Env-var pointer** | `AGENT_RELAY_PLUGINS` = a **comma-separated** list of module paths (**absolute recommended** — a session's cwd isn't obvious; relative is resolved against it), loaded in listed order. A secondary dev convenience. |
+| **Plugin directory** | every top-level `*.mjs` **and** every package subfolder (`<name>/` with a `package.json`, which may carry its own `node_modules`) in `AGENT_RELAY_PLUGIN_DIR` — default the extension's **own** `plugins/` folder (next to `extension.mjs`), so an installed plugin survives core upgrades. |
 
-**Contract** — a plugin module **default-exports a factory** (it may be `async`) that
-returns an interceptor (any subset of the seam's `onSend` / `onReceive` / `renderPrompt`):
+**Contract** — a plugin module **default-exports a factory** (it may be `async`) that returns a
+**Registration** declaring any subset of: `interceptors` (an array — every plugin's aggregate, in load
+order), `transport`, `credentials`, `identity` (each single-instance, last-loaded wins). The common
+case — one interceptor:
 
 ```js
-// my-interceptor.mjs
-export default function createInterceptor(ctx) {
+// my-plugin.mjs
+export default function createPlugin(ctx) {
   // ctx = { env, dataDir, log }   — no `self`; identity isn't resolved yet.
   //   env     — process.env (read your own config vars)
   //   dataDir — the per-user data dir (string, or null) for any plugin state
   //   log     — log(message[, { level: "warning" | "error" }]) → the diagnostic log
-  // ctx.log("my-guardrail ready");   // optional: announce yourself
   return {
-    // Gate/transform inbound: call next(msg) to pass it on, or return WITHOUT
-    // calling next to drop it. (To reject a message, DROP it — don't throw.)
-    onReceive(message, next) { return next(message); },
-    // Optional: shape the wake prompt; return null to defer to the default.
-    renderPrompt(message) { return null; },
-    // Optional: onSend(message, next)
+    interceptors: [{
+      // Gate/transform inbound: call next(msg) to pass it on, or return WITHOUT
+      // calling next to drop it. (To reject a message, DROP it — don't throw.)
+      onReceive(message, next) { return next(message); },
+      // Optional: shape the wake prompt; return null to defer to the default.
+      renderPrompt(message) { return null; },
+      // Optional: onSend(message, next)
+    }],
+    // transport:   { id, create(ctx) { /* ... */ } },  // optional — see agent-relay-pg-plugin
+    // credentials: () => ({ get() { /* ... */ } }),     // optional
+    // identity:    { resolve(session) { /* ... */ } },  // optional
   };
 }
 ```
 
-- **Trusted, not sandboxed.** Loaded modules are **your own code** — only ever the modules
-  you point at via the env var / plugin dir. The loader fetches nothing and never loads
-  anything derived from message content.
-- **Load-time safe-degrade.** A plugin that fails to import, isn't a factory, or returns no
-  usable hook is **skipped and logged** — it never blocks startup. (A plugin that *hangs*
-  is out of scope; it's trusted code. Once loaded, a plugin's *runtime* hook behaviour
-  follows the Interceptor seam — to reject a message, **drop it, don't throw**.)
-- **Opt-in.** With no `AGENT_RELAY_INTERCEPTORS` paths **and** no `*.mjs` in the plugin
-  directory, nothing loads — behaviour is exactly as before.
+- **Trusted, not sandboxed.** Loaded modules are **your own code** — only ever the modules you point at
+  via the env var / plugin dir. The loader fetches nothing and never loads anything derived from message
+  content.
+- **Fail-loud + all-or-nothing.** A plugin that fails to import, isn't a factory, returns an invalid
+  registration, or declares any invalid capability makes startup **stop with a clear error naming the
+  plugin** — the extension reports **inactive** (`send_message` / `list_relay_agents` say it didn't start)
+  rather than silently running degraded. A plugin is folded in only after its WHOLE registration
+  validates. (A plugin that *hangs* is out of scope — it's trusted code.)
+- **Opt-in.** With no `AGENT_RELAY_PLUGINS` paths **and** no plugins in the directory, nothing loads —
+  behaviour is exactly the dependency-free local default.
 
-**Verify it loaded.** On startup each plugin logs `plugin loaded: <name>` (plus an
-`external interceptors active: <count>` summary) to the rolling diagnostic log at
-`<data-dir>/logs/agent-relay.log`; a rejected one logs `plugin skipped: <name> (<reason>)`.
-On Windows `<data-dir>` defaults to `%LOCALAPPDATA%\agent-relay` (see *Configuration*).
+**Verify it loaded.** On startup each plugin logs `plugin loaded: <name>` to the rolling diagnostic log at
+`<data-dir>/logs/agent-relay.log`; a failing one makes the extension fail to start with the error above
+(naming the plugin). On Windows `<data-dir>` defaults to `%LOCALAPPDATA%\agent-relay` (see *Configuration*).
 
 ## License
 

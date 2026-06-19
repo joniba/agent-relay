@@ -16,8 +16,7 @@
  * provider, and runs the schema migration — i.e. it exercises auth, TLS,
  * reachability, and schema in one shot, exactly as a real session does.
  */
-import { pathToFileURL, fileURLToPath } from "node:url";
-import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
 import createPgPlugin from "../index.mjs";
@@ -111,19 +110,9 @@ export function classify(err, env = process.env) {
 
 /** Imperative entry: load the installed config, bring the transport up, classify. */
 async function main() {
-  const dir = process.argv[2];
-  if (!dir) fail(EXIT.OTHER, "preflight: missing <installed-extension-dir> argument");
-
-  // Best-effort: load the installed `.env` exactly as a real session does, via the
-  // installed extension's own env loader (so the same config gaps get filled). If
-  // the installed dir has no env loader, fall back to the ambient environment.
-  try {
-    const { loadEnvFile } = await import(pathToFileURL(join(dir, "env-file.mjs")).href);
-    loadEnvFile?.();
-  } catch {
-    /* no installed env loader — rely on the ambient environment */
-  }
-
+  // Importing `../index.mjs` above already populated process.env from the plugin's
+  // own installed `.env` (the plugin owns its config; D7). So we just read it — no
+  // import back into core, no separate env loader.
   if (!process.env.AGENT_RELAY_PG_HOST) {
     fail(
       EXIT.OTHER,
@@ -131,7 +120,7 @@ async function main() {
     );
   }
 
-  const self = { id: `preflight-${Date.now()}`, name: "preflight", deviceName: "preflight" };
+  const self = { id: `preflight-${Date.now()}`, name: "preflight" };
   let transport;
   try {
     // Build the transport + credentials from THIS plugin's own factory — the same

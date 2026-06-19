@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 
-import { loadEnvFile } from "../extension/env-file.mjs";
+import { loadEnvFile } from "../env-file.mjs";
 
 function tmp() {
   return mkdtempSync(join(tmpdir(), "agent-relay-env-"));

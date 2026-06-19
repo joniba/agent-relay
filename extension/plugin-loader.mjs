@@ -1,6 +1,12 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { isAbsolute, resolve, join, basename } from "node:path";
-import { pathToFileURL } from "node:url";
+import { isAbsolute, resolve, join, basename, dirname } from "node:path";
+import { pathToFileURL, fileURLToPath } from "node:url";
+
+// This module sits at the extension ROOT (next to extension.mjs), so its own
+// directory IS the installed extension dir. The default drop-in plugin folder is
+// `<that dir>/plugins` — i.e. the extension's OWN `plugins/` subfolder, NOT the
+// per-user data dir. Code travels with the extension; only state lives in dataDir.
+const SELF_DIR = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Load plugins at startup and fold them into a single aggregated **registry** —
@@ -24,9 +30,10 @@ import { pathToFileURL } from "node:url";
  *   1. `env.AGENT_RELAY_PLUGINS` — a comma-separated list of module paths
  *      (absolute, or resolved against `process.cwd()`). A SECONDARY dev
  *      convenience for pointing at an un-copied repo.
- *   2. The plugin DIRECTORY (primary): `env.AGENT_RELAY_PLUGIN_DIR`, else (only
- *      when `dataDir` is set) `<dataDir>/plugins`. Entries are taken in
- *      alphabetical order: a top-level `*.mjs` file is imported directly; a
+ *   2. The plugin DIRECTORY (primary): `env.AGENT_RELAY_PLUGIN_DIR`, else the
+ *      extension's OWN `plugins/` subfolder (`<extension-dir>/plugins`, resolved
+ *      relative to this module's install location — NOT the data dir). Entries are
+ *      taken in alphabetical order: a top-level `*.mjs` file is imported directly; a
  *      subdirectory with a `package.json` resolves its entry as
  *      `agentRelay.entry` -> `main` -> `index.mjs` and is imported by absolute
  *      `file:` URL (so a deps-carrying plugin resolves against its own
@@ -42,17 +49,21 @@ import { pathToFileURL } from "node:url";
  * MISSING plugin dir is the normal zero-plugin case (returns the empty registry);
  * a dir that exists but is UNREADABLE is a failure and throws.
  *
- * @param {{ env?: NodeJS.ProcessEnv, dataDir?: string|null, log?: import('../seams/log.mjs').Logger }} [ctx]
+ * @param {{ env?: NodeJS.ProcessEnv, dataDir?: string|null, log?: import('./seams/log.mjs').Logger }} [ctx]
+ *   `dataDir` is the per-user STATE dir handed to plugins (for their own DB/files);
+ *   it no longer locates the plugin folder (that is the extension's own `plugins/`).
  * @param {{
  *   importer?: (url: string) => Promise<any>,
  *   readEntries?: (dir: string) => Array<{ name: string, isDirectory: boolean }>,
  *   readJson?: (path: string) => any,
- * }} [deps]  DI seams for tests (default: real dynamic `import()` + `fs`).
+ *   baseDir?: string,
+ * }} [deps]  DI seams for tests (default: real dynamic `import()` + `fs`; `baseDir`
+ *   defaults to this module's own dir — the installed extension root).
  * @returns {Promise<{
- *   interceptors: import('../seams/interceptor.mjs').Interceptor[],
- *   transport: { id?: string, create: (ctx: any) => import('../seams/transport.mjs').Transport } | null,
- *   credentials: import('../seams/credentials.mjs').CredentialProvider | null,
- *   identity: import('../seams/identity.mjs').IdentityProvider | null,
+ *   interceptors: import('./seams/interceptor.mjs').Interceptor[],
+ *   transport: { id?: string, create: (ctx: any) => import('./seams/transport.mjs').Transport } | null,
+ *   credentials: import('./seams/credentials.mjs').CredentialProvider | null,
+ *   identity: import('./seams/identity.mjs').IdentityProvider | null,
  * }>}
  */
 export async function loadPlugins(ctx = {}, deps = {}) {
@@ -62,11 +73,12 @@ export async function loadPlugins(ctx = {}, deps = {}) {
   const importer = deps.importer ?? ((url) => import(url));
   const readEntries = deps.readEntries ?? defaultReadEntries;
   const readJson = deps.readJson ?? defaultReadJson;
+  const baseDir = deps.baseDir ?? SELF_DIR;
 
   const pluginCtx = { env, dataDir, log };
   const registry = { interceptors: [], transport: null, credentials: null, identity: null };
 
-  for (const { name, entryPath } of resolveSources(env, dataDir, readEntries, readJson)) {
+  for (const { name, entryPath } of resolveSources(env, baseDir, readEntries, readJson)) {
     await loadOne({ name, entryPath, pluginCtx, importer, log, registry });
   }
   return registry;
@@ -80,7 +92,7 @@ export async function loadPlugins(ctx = {}, deps = {}) {
  * Dir-failure policy: a MISSING dir contributes nothing (zero-plugin norm); a dir
  * that exists but is unreadable THROWS (fail loud).
  */
-function resolveSources(env, dataDir, readEntries, readJson) {
+function resolveSources(env, baseDir, readEntries, readJson) {
   const sources = [];
 
   // 1) Explicit env-var paths (comma-separated), in listed order - dev convenience.
@@ -89,13 +101,13 @@ function resolveSources(env, dataDir, readEntries, readJson) {
     sources.push({ name: basename(entryPath), entryPath });
   }
 
-  // 2) Plugin directory (primary): explicit override, else <dataDir>/plugins.
+  // 2) Plugin directory (primary): explicit override, else the extension's OWN
+  //    `plugins/` subfolder (`<baseDir>/plugins`). Always resolves to a path; if it
+  //    doesn't exist on disk that's the normal zero-plugin case (handled below).
   const dir = env.AGENT_RELAY_PLUGIN_DIR
     ? resolve(process.cwd(), env.AGENT_RELAY_PLUGIN_DIR)
-    : dataDir
-      ? join(dataDir, "plugins")
-      : null;
-  if (dir) {
+    : join(baseDir, "plugins");
+  {
     let entries;
     try {
       entries = readEntries(dir);
