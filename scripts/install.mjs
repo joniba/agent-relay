@@ -136,29 +136,6 @@ function copyDir(srcDir, dstDir) {
 }
 
 copyDir(source, dest);
-removeLegacyLoader(dest);
-
-// One-time upgrade migration. Older releases shipped the loader as
-// `extension/plugins/loader.mjs`, which the old installer copied to
-// `<dest>/plugins/loader.mjs`. The loader now lives at the extension ROOT, and that
-// `plugins/` folder is the drop-in directory it SCANS — so a leftover `loader.mjs`
-// there would be imported as a (factory-less) plugin and fail-loud the WHOLE extension
-// on the first upgrade. Remove that specific legacy artifact (identified by its old
-// content) before the loader ever sees it. A genuine user plugin happening to be named
-// `loader.mjs` (without the old-core signature) is left untouched.
-function removeLegacyLoader(destDir) {
-  const legacy = join(destDir, "plugins", "loader.mjs");
-  try {
-    if (!existsSync(legacy)) return;
-    const body = readFileSync(legacy, "utf8");
-    if (body.includes("export async function loadPlugins") || body.includes("function resolveSources")) {
-      rmSync(legacy, { force: true });
-      warn(`Migrated: removed legacy ${legacy} (the loader moved to the extension root; the stale copy would break plugin loading).`);
-    }
-  } catch (e) {
-    warn(`Could not remove legacy plugins/loader.mjs (${e.message}). If the extension fails to start after this upgrade, delete '${legacy}' manually.`);
-  }
-}
 
 // --- Verify ------------------------------------------------------------------
 if (!existsSync(join(dest, "extension.mjs"))) {
