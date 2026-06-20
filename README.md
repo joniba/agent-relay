@@ -46,10 +46,10 @@ npx --yes github:joniba/agent-relay --uninstall            # remove the extensio
 npx --yes github:joniba/agent-relay --uninstall --purge    # the above, and also delete the runtime DB + logs
 ```
 
-**Cross-machine messaging** is a separate drop-in plugin; installing it brings core along:
+**Cross-machine messaging** is a separate drop-in plugin — add it with core's plugin installer:
 
 ```bash
-npx --yes github:joniba/agent-relay-pg-plugin
+npx --yes github:joniba/agent-relay --add-plugin github:joniba/agent-relay-pg-plugin
 ```
 
 <details>
@@ -137,10 +137,10 @@ The default mesh is **single-machine** (local SQLite). To wake sessions across *
 install the **[agent-relay-pg-plugin](https://github.com/joniba/agent-relay-pg-plugin)** — a drop-in
 plugin that swaps the local SQLite transport for a shared **Postgres** mesh (each machine mints its own
 short-lived Microsoft Entra token locally; tokens are never copied between machines) and adds machine
-provenance to the wake prompt and the `list_relay_agents` roster. It installs core alongside it:
+provenance to the wake prompt and the `list_relay_agents` roster. Add it with core's plugin installer:
 
 ```bash
-npx --yes github:joniba/agent-relay-pg-plugin
+npx --yes github:joniba/agent-relay --add-plugin github:joniba/agent-relay-pg-plugin
 ```
 
 See that repo's README for provisioning, configuration, the security model, and teardown.
@@ -170,7 +170,24 @@ changes (OCP):
 
 ### External plugins
 
-A plugin loads **your own modules** at startup and can supply any of four seams — interceptors (guardrails /
+**Install a plugin from a GitHub repo** — core clones it, runs `npm install --omit=dev` for its prod
+dependencies, and copies it into the extension's own `plugins/` folder (the same folder it scans at
+startup):
+
+```bash
+npx --yes github:joniba/agent-relay --add-plugin <owner/repo> [--ref <branch|tag|sha>]
+npx --yes github:joniba/agent-relay --remove-plugin <name>      # <name> = the plugin's package.json "name"
+```
+
+A plugin ships **no installer of its own** — it only needs a `package.json` declaring a `name`, a `files`
+allowlist (what core copies — **literal file/dir paths, not npm globs**), an entry (`agentRelay.entry` →
+`main` → `index.mjs`), and any runtime `dependencies`. GitHub repos only (no npm registry); a local path or
+full git URL also works (dev/offline). `--add-plugin` installs core only if it's **missing** — it never
+re-installs or upgrades an already-installed core (run the bare `npx --yes github:joniba/agent-relay` to do
+that). Re-running `--add-plugin` **upgrades the plugin** in place and preserves the plugin's local config —
+a gitignored `.env` / `.env.*` in the plugin folder survives the upgrade.
+
+At startup, a plugin loads **your own modules** and can supply any of four seams — interceptors (guardrails /
 middleware), the transport, credentials, or identity (the Sink is wired in the entry, not via plugins) — so a capability can live in a separate,
 even **private**, repo or a local folder, never in this one. Two sources, loaded in order (env entries
 first, then the directory, alphabetically):
