@@ -56,9 +56,10 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
       to,
       body: content,
       inReplyTo,
-      // Stamp our session id as machine-agnostic provenance: the recipient's default
-      // header shows `<from-alias>-<from-id>` so it knows the id to reply to. Any
-      // machine/device provenance is added by a transport's plugin interceptor, not core.
+      // Stamp our session id as machine-agnostic provenance in `meta.fromId`. It is
+      // NOT rendered in the default wake header (the alias is the reply handle); it
+      // stays in metadata for any plugin that wants it. Any machine/device provenance
+      // is added by a transport's plugin interceptor, not core.
       meta: { fromId: self.id },
     });
 

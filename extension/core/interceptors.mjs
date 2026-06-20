@@ -63,10 +63,12 @@ export async function runChain(interceptors, hook, message) {
 
 /**
  * The core's neutral default wake-prompt renderer. Machine-agnostic (F1a) and
- * minimal: it identifies the sender (alias + the session id a reply could be
- * addressed to) and the recipient alias, then the body. NO machine/device segment
- * — that is added by a transport's plugin interceptor (which overrides this). NO
- * routing/reply directives — any such guidance is an opt-in interceptor.
+ * minimal: it identifies the sender alias and the recipient alias, then the body.
+ * The sender's session id stays in `message.meta.fromId` (provenance for plugins)
+ * but is NOT rendered — the alias alone is the clean, addressable reply handle. NO
+ * machine/device segment — that is added by a transport's plugin interceptor (which
+ * overrides this). NO routing/reply directives — any such guidance is an opt-in
+ * interceptor.
  *
  * @param {Message} message
  * @param {import('../seams/identity.mjs').AgentIdentity} [self]  The recipient identity (for `<to-alias>`).
@@ -74,12 +76,15 @@ export async function runChain(interceptors, hook, message) {
  */
 export function defaultRenderPrompt(message, self) {
   // Sanitize the STRUCTURED header fields (peer-controlled) so a crafted sender
-  // alias / id can't forge line breaks or extra framing in the wake prompt. The
-  // body below the blank line is intentionally left as-is (untrusted content).
+  // alias can't forge line breaks or extra framing in the wake prompt. The body
+  // below the blank line is intentionally left as-is (untrusted content).
   const fromName = stripControl(message.from);
-  const from = message.meta && message.meta.fromId ? `-${stripControl(message.meta.fromId)}` : "";
   const to = stripControl((self && self.name) || message.to || "unknown");
-  return `[agent-relay] Message from: ${fromName}${from} -> ${to}\n\n${message.body}`;
+  // The sender's session id stays in `message.meta.fromId` (provenance a plugin can
+  // use) but is deliberately kept OUT of the rendered header: gluing it to the alias
+  // produced an ugly, non-addressable token (`alias-id`) that recipients tried to
+  // reply to verbatim. The alias alone is the addressable reply handle.
+  return `[agent-relay] Message from: ${fromName} -> ${to}\n\n${message.body}`;
 }
 
 /**
