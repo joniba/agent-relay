@@ -19,7 +19,7 @@
 // written via a temp file + atomic rename, so a half-written file is never observed.
 
 import { existsSync, readdirSync, copyFileSync, mkdirSync, renameSync, rmSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 
@@ -35,6 +35,59 @@ const ok = (m) => console.log(`${GREEN}${m}${RESET}`);
 const warn = (m) => console.warn(`${YELLOW}${m}${RESET}`);
 const info = (m) => console.log(`${CYAN}${m}${RESET}`);
 const die = (m) => { console.error(`\n${m}`); process.exit(1); };
+
+// --- Destination -------------------------------------------------------------
+const copilotHome = process.env.COPILOT_HOME || join(homedir(), ".copilot");
+const dest = join(copilotHome, "extensions", "agent-relay");
+
+// --- Uninstall mode (early exit; no source/build needed) ---------------------
+const UNINSTALL = argv.includes("--uninstall");
+const PURGE = argv.includes("--purge");
+if (UNINSTALL) {
+  if (existsSync(dest)) { rmSync(dest, { recursive: true, force: true }); ok(`\u2713 Removed ${dest}`); }
+  else { info(`Nothing installed at ${dest}.`); }
+  revertStatusline();
+  if (PURGE) purgeState();
+  else info(`Runtime state (DB + logs) kept at ${dataDir()} — re-run with --purge to remove it too.`);
+  info(`\nagent-relay uninstalled. Reinstall: npx --yes github:joniba/agent-relay#feature/plugin-loader`);
+  process.exit(0);
+}
+
+/** Reset Copilot's statusLine ONLY if it points at agent-relay's statusline script. */
+function revertStatusline() {
+  const settingsPath = join(copilotHome, "settings.json");
+  if (!existsSync(settingsPath)) return;
+  let settings;
+  try { settings = JSON.parse(readFileSync(settingsPath, "utf8")); } catch { return; }
+  const cmd = settings && settings.statusLine && settings.statusLine.command;
+  if (typeof cmd === "string" && /agent-relay-statusline\.mjs/.test(cmd)) {
+    delete settings.statusLine;
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2), "utf8");
+    ok(`\u2713 Reverted Copilot statusline (${settingsPath})`);
+  }
+}
+
+/** Per-user data dir (DB + logs) — mirrors extension/storage/paths.mjs resolveDataDir(). */
+function dataDir() {
+  if (process.env.AGENT_RELAY_DATA_DIR) return process.env.AGENT_RELAY_DATA_DIR;
+  if (process.platform === "win32") return join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "agent-relay");
+  if (process.platform === "darwin") return join(homedir(), "Library", "Application Support", "agent-relay");
+  return join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "agent-relay");
+}
+
+/** With --purge: remove the data dir, but ONLY when it's a dedicated `agent-relay` dir (the
+ *  default, or a custom AGENT_RELAY_DATA_DIR whose leaf is `agent-relay`). For any other custom
+ *  dir we refuse — never risk wiping a shared directory the user pointed us at. */
+function purgeState() {
+  const dd = dataDir();
+  if (!existsSync(dd)) { info(`No runtime state at ${dd}.`); return; }
+  if (basename(dd) === "agent-relay") {
+    rmSync(dd, { recursive: true, force: true });
+    ok(`\u2713 Removed runtime state (DB + logs): ${dd}`);
+  } else {
+    warn(`--purge skipped: AGENT_RELAY_DATA_DIR=${dd} is not a dedicated 'agent-relay' directory; refusing to delete it wholesale. Remove ${join(dd, "agent-relay.db")} (+ -wal/-shm) and the agent-relay logs manually for a full reset.`);
+  }
+}
 
 // --- Locate the source (this script lives in <repo>/scripts) -----------------
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -52,9 +105,7 @@ if (!existsSync(entry)) {
   else warn(`Node ${process.versions.node} found, but agent-relay needs >= 22.5.0 (node:sqlite). The extension will fail to load until you upgrade.`);
 }
 
-// --- Resolve destination -----------------------------------------------------
-const copilotHome = process.env.COPILOT_HOME || join(homedir(), ".copilot");
-const dest = join(copilotHome, "extensions", "agent-relay");
+// --- Install: ensure the extensions dir exists -------------------------------
 mkdirSync(dirname(dest), { recursive: true });
 
 // --- Install: non-purging atomic delta-copy ----------------------------------

@@ -39,6 +39,13 @@ update or switch your checkout first, then re-run `node scripts/install.mjs`. Th
 delta-copy — it refreshes the code in place and **never deletes** your runtime DB (`*.db*`) or any installed
 plugins (`plugins/<name>/`), so you can upgrade **while sessions are running**.
 
+**Uninstalling** (no manual file deletion needed):
+
+```bash
+npx --yes github:joniba/agent-relay --uninstall            # remove the extension + agent-relay statusline wiring; KEEPS the runtime DB + logs
+npx --yes github:joniba/agent-relay --uninstall --purge    # the above, and also delete the runtime DB + logs
+```
+
 **Cross-machine messaging** is a separate drop-in plugin; installing it brings core along:
 
 ```bash
