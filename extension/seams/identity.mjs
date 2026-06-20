@@ -26,11 +26,6 @@
  *   first). When present, a registry MAY register this session under the first
  *   candidate not already taken by another session (collision avoidance) and
  *   reflect the chosen name back on `name`. When absent, `name` is used as-is.
- * @property {string} [deviceName]
- *   OPTIONAL display-only machine label (e.g. "my-laptop"), attached by the entry
- *   (not the identity generator — it's host metadata, not identity). Informative
- *   roster metadata only; NEVER used for addressing or collision. A transport MAY
- *   persist and return it; one that doesn't simply ignores it.
  */
 
 /**

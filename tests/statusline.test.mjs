@@ -27,7 +27,7 @@ test("resolveName: deterministic wordlist alias from the session id (matches ide
 });
 
 test("resolveName: AGENT_RELAY_NAME override wins", () => {
-  assert.equal(resolveName("sess-1", { AGENT_RELAY_NAME: "tia" }), "tia");
+  assert.equal(resolveName("sess-1", { AGENT_RELAY_NAME: "alice" }), "alice");
 });
 
 test("resolveName: no session id → null (statusline stays empty)", () => {

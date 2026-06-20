@@ -13,6 +13,8 @@
  * @typedef {import('./message.mjs').Message} Message
  */
 
+import { stripControl } from "./sanitize.mjs";
+
 /**
  * Run a single hook (`onSend` or `onReceive`) across the interceptor list, in
  * the canonical middleware style: each hook gets `(message, next)`, where
@@ -60,16 +62,29 @@ export async function runChain(interceptors, hook, message) {
 }
 
 /**
- * The core's neutral default wake-prompt renderer. Strictly minimal (F2):
- * sender + body, with just enough framing for the recipient to recognize a peer
- * message (not a user instruction). NO routing/reply directives — the spike
- * lesson; any such guidance is an opt-in interceptor's `renderPrompt`.
+ * The core's neutral default wake-prompt renderer. Machine-agnostic (F1a) and
+ * minimal: it identifies the sender alias and the recipient alias, then the body.
+ * The sender's session id stays in `message.meta.fromId` (provenance for plugins)
+ * but is NOT rendered — the alias alone is the clean, addressable reply handle. NO
+ * machine/device segment — that is added by a transport's plugin interceptor (which
+ * overrides this). NO routing/reply directives — any such guidance is an opt-in
+ * interceptor.
  *
  * @param {Message} message
+ * @param {import('../seams/identity.mjs').AgentIdentity} [self]  The recipient identity (for `<to-alias>`).
  * @returns {string}
  */
-export function defaultRenderPrompt(message) {
-  return `[agent-relay] Message from ${message.from}:\n\n${message.body}`;
+export function defaultRenderPrompt(message, self) {
+  // Sanitize the STRUCTURED header fields (peer-controlled) so a crafted sender
+  // alias can't forge line breaks or extra framing in the wake prompt. The body
+  // below the blank line is intentionally left as-is (untrusted content).
+  const fromName = stripControl(message.from);
+  const to = stripControl((self && self.name) || message.to || "unknown");
+  // The sender's session id stays in `message.meta.fromId` (provenance a plugin can
+  // use) but is deliberately kept OUT of the rendered header: gluing it to the alias
+  // produced an ugly, non-addressable token (`alias-id`) that recipients tried to
+  // reply to verbatim. The alias alone is the addressable reply handle.
+  return `[agent-relay] Message from: ${fromName} -> ${to}\n\n${message.body}`;
 }
 
 /**
@@ -78,14 +93,15 @@ export function defaultRenderPrompt(message) {
  *
  * @param {Interceptor[]} interceptors
  * @param {Message} message
+ * @param {import('../seams/identity.mjs').AgentIdentity} [self]  The recipient identity.
  * @returns {string}
  */
-export function renderPrompt(interceptors, message) {
+export function renderPrompt(interceptors, message, self) {
   for (const interceptor of interceptors) {
     if (typeof interceptor.renderPrompt === "function") {
-      const rendered = interceptor.renderPrompt(message);
+      const rendered = interceptor.renderPrompt(message, self);
       if (rendered != null) return rendered;
     }
   }
-  return defaultRenderPrompt(message);
+  return defaultRenderPrompt(message, self);
 }

@@ -1,27 +1,19 @@
 # agent-relay — repository instructions
 
-## Cross-machine config (`extension/.env`) and new worktrees
+## Local-only core (cross-machine lives in the pg-plugin)
 
-The cross-machine Postgres settings live in **`extension/.env`**, which is
-**gitignored** — it's local-only and per-machine (it holds non-secret host / DB user /
-DB name / tenant values; database auth uses short-lived Microsoft Entra tokens minted
-locally via `az login`, never stored in the file). `extension/.env.example` documents
-every key.
+agent-relay **core** is local-only and **dependency-free** — it uses Node's built-in
+`node:sqlite`, so sessions on one machine wake each other via a local SQLite mesh. Core
+reads configuration from the **process environment**; it does **not** load a `.env` file.
 
-Because the file is gitignored, **`git worktree add` does NOT carry it into a new
-worktree.** A session in a worktree without it silently runs in single-machine **LOCAL**
-mode (it won't join the cross-machine mesh) — and no error is shown.
+**Cross-machine messaging is a separate plugin.** The Postgres transport, Azure/Entra
+credentials, provisioning, and all cross-machine `.env` handling live in the
+[agent-relay-pg-plugin](https://github.com/joniba/agent-relay-pg-plugin) repo and install as
+a drop-in plugin (`npx --yes github:joniba/agent-relay-pg-plugin`) — **not here**. Do not
+add `pg`/`@azure` code or dependencies to this repo; core stays dependency-free.
 
-**So: whenever you create a new worktree, copy `extension/.env` from the main
-worktree into it.** The main worktree holds the canonical copy.
-
-```powershell
-# Run from inside the freshly-added worktree. The main worktree is the first
-# entry of `git worktree list`.
-$main = ((git worktree list --porcelain) | Select-String '^worktree ' |
-         Select-Object -First 1) -replace '^worktree ', ''
-Copy-Item (Join-Path $main 'extension\.env') 'extension\.env'
-```
-
-If you don't intend the new worktree to do cross-machine work (e.g. it only runs the
-local-default tests), you can skip the copy — it will just operate in LOCAL mode.
+Plugins load from the extension's own `plugins/` folder (or `AGENT_RELAY_PLUGIN_DIR` /
+`AGENT_RELAY_PLUGINS`) — see the README's *External plugins* section. By default they live under the
+installed extension (not in this repo), so there is no core `.env` or plugin file to copy into new
+worktrees; if you deliberately point `AGENT_RELAY_PLUGIN_DIR` / `AGENT_RELAY_PLUGINS` at a worktree-local
+path, keep that path valid.

@@ -29,8 +29,8 @@ async function waitFor(predicate, { timeoutMs = 1500, stepMs = 10 } = {}) {
 
 test("folder-name identity: override > env > cwd leaf; id = sessionId", async () => {
   const session = { sessionId: "sess-xyz" };
-  const fromOverride = await createFolderNameIdentity({ nameOverride: "tia" }).resolve(session);
-  assert.deepEqual(fromOverride, { id: "sess-xyz", name: "tia" });
+  const fromOverride = await createFolderNameIdentity({ nameOverride: "alice" }).resolve(session);
+  assert.deepEqual(fromOverride, { id: "sess-xyz", name: "alice" });
 
   const fromCwd = await createFolderNameIdentity({ cwd: "C:/some/path/my-repo" }).resolve(session);
   assert.equal(fromCwd.name, "my-repo");

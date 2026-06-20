@@ -11,8 +11,7 @@
  * The alias is a DETERMINISTIC function of the local session id — the same
  * derivation the identity provider uses — so we compute it directly here. That
  * means NO database read and NO network, and it is transport-agnostic: it works
- * whether the session joined the local SQLite mesh or the cross-machine Postgres
- * mesh. Precedence mirrors the identity provider: an explicit AGENT_RELAY_NAME
+ * whether the session joined the local SQLite mesh or a cross-machine mesh. Precedence mirrors the identity provider: an explicit AGENT_RELAY_NAME
  * wins, else the wordlist alias. (A registry collision could in theory bump the
  * registered name off this first choice; that rare case isn't reflected here.)
  *

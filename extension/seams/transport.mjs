@@ -26,7 +26,9 @@
  *   Remove this session from discovery (called on session end).
  *
  * @property {() => Promise<AgentIdentity[]>} listAgents
- *   Return the currently-addressable peers (realizes F3 discovery).
+ *   Return the currently-addressable peers (realizes F3 discovery). An entry MAY
+ *   carry an opaque `attributes: Record<string,string>` bag the core renders in the
+ *   roster but does NOT interpret (e.g. a cross-machine transport's `machine`/host).
  *
  * @property {(message: Message) => Promise<SendResult>} send
  *   Outbound: record/transmit a message toward its recipient. `message.to`
@@ -68,10 +70,6 @@
  * @property {boolean} accepted        True if the transport accepted the message.
  * @property {string} [id]             The message id, when accepted.
  * @property {string} [error]          Human-readable reason when not accepted.
- * @property {string} [device]         Recipient's device/host name, when the transport
- *                                     resolved it — diagnostics only (e.g. logging the
- *                                     target machine of a cross-machine send). A
- *                                     single-machine transport MAY omit it.
  */
 
 /**

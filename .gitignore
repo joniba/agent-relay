@@ -1,11 +1,11 @@
 # Local-only working/planning docs (plans, designs, notes, probes) — never committed.
 working-docs/
 
+# In-repo git worktrees (feature work) — never tracked.
+worktrees/
+
 # Playwright MCP scratch (browser snapshots/logs)
 .playwright-mcp/
-
-# Phase-2 throwaway spike (Azure PG validation)
-spike-postgres/
 
 # Node
 node_modules/
