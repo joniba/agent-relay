@@ -49,7 +49,7 @@ if (UNINSTALL) {
   revertStatusline();
   if (PURGE) purgeState();
   else info(`Runtime state (DB + logs) kept at ${dataDir()} — re-run with --purge to remove it too.`);
-  info(`\nagent-relay uninstalled. Reinstall: npx --yes github:joniba/agent-relay#feature/plugin-loader`);
+  info(`\nagent-relay uninstalled. Reinstall: npx --yes github:joniba/agent-relay`);
   process.exit(0);
 }
 
