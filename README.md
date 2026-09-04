@@ -240,6 +240,22 @@ export default function createPlugin(ctx) {
 `<data-dir>/logs/agent-relay.log`; a failing one makes the extension fail to start with the error above
 (naming the plugin). On Windows `<data-dir>` defaults to `%LOCALAPPDATA%\agent-relay` (see *Configuration*).
 
+## Known gaps
+
+**Only one plugin can shape the wake prompt.** When a message arrives, the relay renders it into the
+text that wakes the receiving agent. An interceptor may override that text via `renderPrompt`, but the
+core resolves it **first-non-null-wins** — it takes the first interceptor that returns a string and
+ignores the rest. Since plugins load in a defined order (env-var entries first, then the plugin
+directory alphabetically), two plugins that both want to contribute to the wake prompt will silently
+conflict, and which one survives depends on load order rather than on intent. There is no error and no
+log line.
+
+This is fine today because only one shipped plugin renders prompts — the
+[agent-relay-pg-plugin](https://github.com/joniba/agent-relay-pg-plugin), which adds the sender's
+machine to the header. It becomes a problem as soon as a second prompt-contributing plugin is
+installed alongside it. Composing renderers — each decorating the previous rendering instead of
+replacing it — would fix it, at the cost of a breaking change to the interceptor contract.
+
 ## License
 
 MIT. The cross-session wake mechanism is inspired by
