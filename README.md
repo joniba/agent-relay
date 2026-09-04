@@ -199,9 +199,9 @@ first, then the directory, alphabetically):
 | **Plugin directory** | every top-level `*.mjs` **and** every package subfolder (`<name>/` with a `package.json`, which may carry its own `node_modules`) in `AGENT_RELAY_PLUGIN_DIR` — default the extension's **own** `plugins/` folder (next to `extension.mjs`), so an installed plugin survives core upgrades. |
 
 **Contract** — a plugin module **default-exports a factory** (it may be `async`) that returns a
-**Registration** declaring any subset of: `interceptors`, `tools` and `briefing` (each an array or
-string — every plugin's aggregate, in load order), and `transport`, `credentials`, `identity` (each
-single-instance, last-loaded wins). The common case — one interceptor:
+**Registration**. It may declare `interceptors` and `tools` (arrays) and one `briefing` (a string) —
+all three accumulate across plugins in load order — plus `transport`, `credentials` and `identity`,
+each single-instance, last-loaded wins. The common case — one interceptor:
 
 ```js
 // my-plugin.mjs
@@ -229,42 +229,58 @@ export default function createPlugin(ctx) {
 ```
 
 **Tools and briefing.** A plugin can add tools of its own, and text describing them to the session
-briefing:
+briefing.
+
+A tool is `{ name, description, parameters, handler }` — all four required. `name` must be unique
+across core's tools and every loaded plugin's; `description` is model-facing guidance for a single
+call; `parameters` is the JSON Schema for the handler's argument object; and `handler(args)` returns
+a result like `{ textResultForLlm, resultType: "success" | "failure" }`.
 
 ```js
 return {
   tools: [{
-    name: "my_tool",
-    description: "What it does, for the model.",
-    parameters: { type: "object", properties: { thing: { type: "string" } }, required: ["thing"] },
-    handler: async (args) => ({ textResultForLlm: "done", resultType: "success" }),
+    name: "roles_whois",
+    description: "Return the session currently holding a given role.",
+    parameters: {
+      type: "object",
+      properties: { role: { type: "string", description: "The role to look up" } },
+      required: ["role"],
+    },
+    handler: async ({ role }) => ({
+      textResultForLlm: `${role} is held by gull.`,
+      resultType: "success",
+    }),
   }],
-  briefing: "Use my_tool(thing) to do the thing.",
+  briefing: "Sessions can hold named roles. Before messaging a peer by alias, check roles_whois — " +
+            "aliases change between restarts, roles don't.",
 };
 ```
 
-- **Ship them together.** The tool list is the discovery surface for a human reading it, but for an LLM
-  consumer the **session briefing is the actual onboarding** — it is the paragraph injected at session
-  start. A tool that appears in the list but nowhere in the briefing has to be discovered some other
-  way, which in practice means it doesn't get used. Core describes its own tools and each plugin
-  describes its own; core does not hold a description of a surface it no longer solely owns.
-- **Tool names must be globally unique.** A collision is a load failure, checked three ways: within one
-  registration, across plugins, and against core's own `send_message` / `list_relay_agents`. Shadowing a
-  core tool is refused outright — otherwise a failed boot would have no working tool left to report the
-  failure through.
-- **Handlers must tolerate being called early.** Tools are registered with the runtime before the relay
-  is up, so a handler may run before it can do anything useful. Core's own tools return a "still
-  starting up" result in that window; yours should degrade in kind rather than throw.
+- **Ship briefing text with your tools.** The declaration makes a tool callable and its `description`
+  says what one call does; the briefing is context injected when a session starts, and it is where
+  *when to reach for this at all* belongs. A model rarely infers that from a schema, so a tool with no
+  briefing tends to sit unused even though it is right there in the list. Core briefs its own tools and
+  each plugin briefs its own — which is also why core no longer hardcodes a description of the tool
+  surface, since it stopped being the only thing on it.
+- **Names must not collide.** The loader rejects a duplicate within one registration, a name an
+  earlier-loaded plugin already claimed, and core's own `send_message` / `list_relay_agents`. A
+  collision fails the load rather than picking a winner. Core's names are reserved because a failed
+  boot reports through them. Prefixing your tools (`roles_`, `acme_`) is the easy way to stay clear of
+  everyone else.
+- **Handlers can be called before the relay is up.** Tools are registered with the runtime before the
+  transport connects, so a handler may run while its backing state doesn't exist yet. There is no
+  readiness flag in `ctx` — track your own, and until you're ready return an ordinary failure result
+  rather than throwing. A tool that doesn't touch relay state needs no gate.
 
 - **Trusted, not sandboxed.** Loaded modules are **your own code** — only ever the modules you point at
   via the env var / plugin dir. The loader fetches nothing and never loads anything derived from message
   content.
-- **Fail-loud + all-or-nothing.** A plugin that fails to import, isn't a factory, returns an invalid
-  registration, declares any invalid capability, or claims a tool name already taken makes startup
-  **stop with a clear error naming the plugin** — the extension reports **inactive**
-  (`send_message` / `list_relay_agents` say it didn't start) rather than silently running degraded. A
-  plugin is folded in only after its WHOLE registration validates. (A plugin that *hangs* is out of
-  scope — it's trusted code.)
+- **Fail-loud + all-or-nothing.** Anything the loader catches while importing or validating a plugin —
+  a failed import, a missing factory, an invalid registration, a malformed tool, a name collision —
+  **stops plugin loading with an error naming the plugin**. The extension then joins with core's tools
+  only, and those tools report the inactive state rather than the session silently running degraded. A
+  registration that fails contributes nothing, not even the parts of it that were valid. (A plugin that
+  *hangs* is out of scope — it's trusted code.)
 - **Opt-in.** With no `AGENT_RELAY_PLUGINS` paths **and** no plugins in the directory, nothing loads —
   behaviour is exactly the dependency-free local default.
 

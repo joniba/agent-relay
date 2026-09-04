@@ -352,6 +352,25 @@ const tool = (name, extra = {}) => ({
   ...extra,
 });
 
+test("a plugin's own registration is rejected before the runtime ever sees the tool", async () => {
+  // The runtime turns `parameters` into a JSON Schema during joinSession. If a bad
+  // one got that far there would be no session left to report the failure through,
+  // so it has to fail here, named.
+  await assert.rejects(
+    () =>
+      loadPlugins(
+        { env: { AGENT_RELAY_PLUGINS: "/p/schema.mjs" }, dataDir: null },
+        {
+          importer: fakeImporter({
+            "schema.mjs": mod(() => ({ tools: [tool("x", { parameters: "not-an-object" })] })),
+          }),
+          ...noScan,
+        },
+      ),
+    /plugin "schema\.mjs".*tool "x" has no parameters object/,
+  );
+});
+
 test("tools aggregate across plugins in load order, and are recorded per plugin", async () => {
   const importer = fakeImporter({
     "a.mjs": mod(() => ({ name: "a", tools: [tool("alpha")] })),
@@ -462,7 +481,11 @@ test("an invalid tool is a load failure naming the plugin (all-or-nothing)", asy
     [{ tools: "nope" }, /tools must be an array/],
     [{ tools: [null] }, /tool #0 is not an object/],
     [{ tools: [{ handler: () => {} }] }, /tool #0 has no name/],
-    [{ tools: [{ name: "x" }] }, /tool "x" has no handler function/],
+    [{ tools: [{ name: "x", parameters: {}, handler: () => {} }] }, /tool "x" has no description/],
+    [{ tools: [{ name: "x", description: "  ", parameters: {}, handler: () => {} }] }, /tool "x" has no description/],
+    [{ tools: [{ name: "x", description: "d", handler: () => {} }] }, /tool "x" has no parameters object/],
+    [{ tools: [{ name: "x", description: "d", parameters: [], handler: () => {} }] }, /tool "x" has no parameters object/],
+    [{ tools: [{ name: "x", description: "d", parameters: {} }] }, /tool "x" has no handler function/],
     [{ briefing: 42 }, /briefing must be a string/],
   ];
   for (const [registration, pattern] of cases) {

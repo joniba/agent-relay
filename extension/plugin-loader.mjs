@@ -251,6 +251,20 @@ function foldRegistration({ name, registration, registry, claimedToolNames }) {
       if (typeof tool.name !== "string" || tool.name === "") {
         throw fail(name, `tool #${i} has no name`);
       }
+      if (typeof tool.description !== "string" || tool.description.trim() === "") {
+        throw fail(name, `tool "${tool.name}" has no description`);
+      }
+      // The runtime turns `parameters` into the tool's JSON Schema. Validating the
+      // shape here means a malformed one fails loudly and names the plugin, rather
+      // than throwing inside joinSession — at which point there is no session left
+      // to report through and the extension simply dies.
+      if (
+        tool.parameters == null ||
+        typeof tool.parameters !== "object" ||
+        Array.isArray(tool.parameters)
+      ) {
+        throw fail(name, `tool "${tool.name}" has no parameters object`);
+      }
       if (typeof tool.handler !== "function") {
         throw fail(name, `tool "${tool.name}" has no handler function`);
       }
