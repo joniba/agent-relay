@@ -343,8 +343,9 @@ function foldRegistration({ name, registration, registry, claimedToolNames }) {
   if (staged.transport !== undefined) registry.transport = staged.transport;
   if (staged.credentials !== undefined) registry.credentials = staged.credentials;
   if (staged.identity !== undefined) registry.identity = staged.identity;
-  // Ordered per-plugin record: the aggregates above lose which plugin supplied
-  // what, which downstream needs to name a failing plugin and preserve load order.
+  // Ordered per-plugin records keep the attribution the aggregate loses. Consumed by
+  // the activation hook in the next change, which must invoke plugins in load order
+  // and name the one that fails.
   registry.plugins.push({
     name,
     tools: staged.tools,

@@ -172,23 +172,31 @@ export function createExtensionRuntime({
     }
 
     // Plugins load BEFORE the session exists, so there is no session id yet and
-    // therefore no log tag. Buffer their diagnostics and replay them once the real
-    // logger is built, rather than losing them or inventing a tag.
+    // therefore no log tag. Buffer until the real logger is built — but this
+    // function is RETAINED for the life of the session by every plugin factory and
+    // by a plugin-supplied transport (whose connect retries and sweeps log from
+    // background timers), so it must forward once a sink exists rather than going
+    // write-only after a single drain.
+    let logSink = null;
     const buffered = [];
-    const bufferLog = (message, opts) => buffered.push([message, opts]);
+    const pluginLog = (message, opts) => {
+      if (logSink) logSink(message, opts);
+      else buffered.push([message, opts]);
+    };
 
     let config = null;
     try {
       config = await createConfig({
         env,
         dataDir,
-        log: bufferLog,
+        log: pluginLog,
         reservedToolNames: coreToolNames,
       });
     } catch (err) {
       // A bad plugin is terminal for the relay but NOT for the join: we still
       // register core's tools below so the failure is reportable through them.
-      bootError = err.message;
+      // `err` is not necessarily an Error — a plugin factory may throw anything.
+      bootError = (err && err.message) || String(err);
     }
 
     pluginBriefings = config?.briefings ?? [];
@@ -235,10 +243,17 @@ export function createExtensionRuntime({
       // where this session's data + logs live. Without it, a shared log can't be correlated
       // to a session.
       relayLog(`boot datadir=${dataDir ?? "?"}`);
-      // Replay everything the plugin loader said before a tagged logger existed.
-      for (const [message, opts] of buffered) relayLog(message, opts);
+      // Replay everything the plugin loader said before a tagged logger existed, then
+      // point the retained plugin logger at the real one. Drain first so replayed
+      // lines keep their order ahead of anything logged from here on; both statements
+      // are synchronous, so nothing can interleave between them.
+      for (const [message, opts] of buffered.splice(0)) relayLog(message, opts);
+      logSink = relayLog;
 
-      if (bootError) {
+      // Guard on the actual invariant. `bootError` is a message, and a plugin can
+      // throw something without one — testing it instead of `config` would let boot
+      // continue and replace the plugin's error with a null dereference.
+      if (!config) {
         relayLog(`agent-relay failed to start: ${bootError}`, { level: "error" });
         return;
       }
@@ -247,7 +262,6 @@ export function createExtensionRuntime({
       relay = started.relay;
       self = started.self;
       transport = started.transport;
-      ready = true;
       // File-only registration detail (id/name) for the log; the human-facing
       // confirmation is the single terminal line below.
       relayLog(`registered id=${String(self.id ?? "").slice(0, 8)} name=${self.name}`);
@@ -258,17 +272,22 @@ export function createExtensionRuntime({
         `🌐 agent-relay: connected to ${config.remote ? "remote" : "local"} transport as [${self.name}]`,
         { terminal: true },
       );
-      // If a teardown was requested while we were booting, honor it now.
+      // Set LAST: everything above can throw, and a half-started relay that reports
+      // itself ready would have tools dereferencing a null relay.
+      ready = true;
+    } catch (err) {
+      // Any boot failure (a transport that couldn't come up) marks the relay INACTIVE
+      // for this session - no silent fallback to a different mesh.
+      ready = false;
+      bootError = (err && err.message) || String(err);
+      relayLog(`agent-relay failed to start: ${bootError}`, { level: "error" });
+    } finally {
+      // If a teardown was requested while we were booting, honor it now — including
+      // when boot failed, since a transport may have half-opened before throwing.
       if (cleanedUp) {
         cleanedUp = false;
         await shutdown();
       }
-    } catch (err) {
-      // Any boot failure (a transport that couldn't come up) marks the relay INACTIVE
-      // for this session - no silent fallback to a different mesh.
-      bootError = err.message;
-      relayLog(`agent-relay failed to start: ${err.message}`, { level: "error" });
-    } finally {
       // Startup window closed: from here on, only errors (not warnings) surface inline.
       booting = false;
     }

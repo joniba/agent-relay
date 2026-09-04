@@ -501,12 +501,12 @@ test("an invalid tool is a load failure naming the plugin (all-or-nothing)", asy
 });
 
 test("a plugin that fails validation contributes NOTHING — not even its valid tools", async () => {
-  // `good` is valid and comes first; `bad` declares one valid tool then an invalid one.
+  // `bad` declares one valid tool and then an invalid one. The whole registration
+  // must be refused, so `alsoValid` never reaches the aggregate.
   const importer = fakeImporter({
     "good.mjs": mod(() => ({ tools: [tool("kept")] })),
     "bad.mjs": mod(() => ({ tools: [tool("alsoValid"), { name: "broken" }] })),
   });
-  const registry = { seen: null };
   await assert.rejects(
     () =>
       loadPlugins(
@@ -515,15 +515,11 @@ test("a plugin that fails validation contributes NOTHING — not even its valid 
       ),
     /plugin "bad\.mjs"/,
   );
-  void registry;
-
-  // And the name the failed plugin tried to claim is not left reserved: loading it
-  // alone, correctly, still works.
-  const ok = await loadPlugins(
-    { env: { AGENT_RELAY_PLUGINS: "/p/retry.mjs" }, dataDir: null },
-    { importer: fakeImporter({ "retry.mjs": mod(() => ({ tools: [tool("alsoValid")] })) }), ...noScan },
-  );
-  assert.deepEqual(ok.tools.map((t) => t.name), ["alsoValid"]);
+  // NOTE: that the registry itself is left untouched after a failed fold is not
+  // observable through loadPlugins — it throws rather than returning the partial
+  // result — so it is deliberately not asserted here. Asserting it via a second,
+  // fresh loadPlugins call would prove nothing: that call allocates its own state
+  // and passes whether or not the first one committed early.
 });
 
 test("zero plugins yields empty tool/briefing aggregates, not undefined", async () => {
