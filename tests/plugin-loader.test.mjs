@@ -381,8 +381,8 @@ test("tools aggregate across plugins in load order, and are recorded per plugin"
     { importer, ...noScan },
   );
 
-  assert.deepEqual(reg.tools.map((t) => t.name), ["alpha", "beta", "gamma"]);
-  // Per-plugin records keep the attribution the aggregate loses.
+  // Tools travel per-plugin, so the entry can tell which plugin a tool came from —
+  // it needs that to disable exactly one plugin's tools if that plugin fails to activate.
   assert.deepEqual(reg.plugins.map((p) => p.name), ["a.mjs", "b.mjs"]);
   assert.deepEqual(reg.plugins[0].tools.map((t) => t.name), ["alpha"]);
   assert.deepEqual(reg.plugins[1].tools.map((t) => t.name), ["beta", "gamma"]);
@@ -416,7 +416,7 @@ test("a tools-only or briefing-only registration is usable on its own", async ()
     { env: { AGENT_RELAY_PLUGINS: "/p/t.mjs" }, dataDir: null },
     { importer: fakeImporter({ "t.mjs": mod(() => ({ tools: [tool("solo")] })) }), ...noScan },
   );
-  assert.equal(toolsOnly.tools.length, 1);
+  assert.equal(toolsOnly.plugins[0].tools.length, 1);
 
   const briefingOnly = await loadPlugins(
     { env: { AGENT_RELAY_PLUGINS: "/p/br.mjs" }, dataDir: null },
@@ -522,9 +522,8 @@ test("a plugin that fails validation contributes NOTHING — not even its valid 
   // and passes whether or not the first one committed early.
 });
 
-test("zero plugins yields empty tool/briefing aggregates, not undefined", async () => {
+test("zero plugins yields empty aggregates, not undefined", async () => {
   const reg = await loadPlugins({ env: {}, dataDir: null }, { importer: fakeImporter({}), ...noScan });
-  assert.deepEqual(reg.tools, []);
   assert.deepEqual(reg.briefings, []);
   assert.deepEqual(reg.plugins, []);
 });

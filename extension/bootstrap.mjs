@@ -69,3 +69,45 @@ export async function startRelaySession({ session, config, log }) {
   relay.start();
   return { relay, self, transport: config.transport };
 }
+
+/**
+ * Invoke every plugin's optional `activate` once, in load order, after this session
+ * has registered and the relay exists.
+ *
+ * This is the ONLY moment a plugin can act on the mesh it just joined. Its factory
+ * ran inside `createConfig` — before identity was resolved and before `register` —
+ * so at that point it could read its configuration but could not know who it turned
+ * out to be, nor see any peer. Declared tools only run when a consumer calls them.
+ *
+ * **Failure is contained, not fatal.** A plugin whose `activate` throws is an
+ * additive capability that did not come up; the session's messaging is unaffected and
+ * must keep working. So the error is logged naming the plugin and returned to the
+ * caller, which marks that plugin's own tools as failed — rather than aborting a
+ * session that is otherwise healthy. This is deliberately unlike plugin *loading*,
+ * which is fail-loud: a bad registration means the seam graph itself is unknown, so
+ * there is nothing safe to run.
+ *
+ * @param {object} deps
+ * @param {Array<{ name: string, activate: Function|null }>} deps.plugins  In load order.
+ * @param {object} deps.relay  The handle handed to plugins (a narrowed relay facade).
+ * @param {import('./seams/identity.mjs').AgentIdentity} deps.self
+ * @param {import('./seams/log.mjs').Logger} [deps.log]
+ * @returns {Promise<Map<string, string>>}  plugin name -> failure message, for those that threw.
+ */
+export async function activatePlugins({ plugins = [], relay, self, log = () => {} }) {
+  const failures = new Map();
+  for (const plugin of plugins) {
+    if (typeof plugin.activate !== "function") continue;
+    try {
+      await plugin.activate({ relay, self });
+      log(`plugin activated: ${plugin.name}`);
+    } catch (err) {
+      const message = (err && err.message) || String(err);
+      failures.set(plugin.name, message);
+      log(`agent-relay: plugin "${plugin.name}" failed to activate: ${message}`, {
+        level: "warning",
+      });
+    }
+  }
+  return failures;
+}

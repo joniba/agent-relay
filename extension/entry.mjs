@@ -22,7 +22,55 @@
 // the same fail-loud-but-visible contract the entry had before the reorder.
 
 import { formatRoster } from "./roster.mjs";
+import { activatePlugins } from "./bootstrap.mjs";
 import { join } from "node:path";
+
+/**
+ * Narrow the relay to what a plugin legitimately needs. A plugin gets to send and to
+ * see who is reachable; it does not get to stop the relay or reach the transport,
+ * which are the host's lifecycle to own.
+ */
+function pluginRelayFacade(relay) {
+  return {
+    sendMessage: (args) => relay.sendMessage(args),
+    listAgents: () => relay.listAgents(),
+  };
+}
+
+/**
+ * Wrap each plugin tool so that, if its plugin failed to activate, calling it says so
+ * instead of running against half-initialised state.
+ *
+ * Without this a failed activation is silent at the tool surface: the handler still
+ * exists and still runs, and the plugin's own not-ready guard (if it has one) reports
+ * a *transient* problem for a condition that will never resolve.
+ *
+ * @param {Array<{ name: string, tools: Array<object> }>} plugins
+ * @param {Map<string, string>} failures  Filled in at activation; read at call time.
+ */
+function guardPluginTools(plugins, failures) {
+  const guarded = [];
+  for (const plugin of plugins) {
+    for (const tool of plugin.tools) {
+      guarded.push({
+        ...tool,
+        handler: async (args) => {
+          const failure = failures.get(plugin.name);
+          if (failure) {
+            return {
+              textResultForLlm:
+                `agent-relay: plugin "${plugin.name}" failed to activate: ${failure}. ` +
+                `Its tools are unavailable for the rest of this session.`,
+              resultType: "failure",
+            };
+          }
+          return tool.handler(args);
+        },
+      });
+    }
+  }
+  return guarded;
+}
 
 /**
  * Build the extension runtime.
@@ -56,6 +104,8 @@ export function createExtensionRuntime({
   let bootError = null; // set if plugin loading or bootstrap failed (terminal, not transient)
   let cleanedUp = false;
   let pluginBriefings = [];
+  /** plugin name -> activation failure message. Read by guarded tool handlers. */
+  const pluginFailures = new Map();
 
   /** Result returned by tools before the relay is usable (booting OR boot-failed). */
   function notReadyResult() {
@@ -200,7 +250,7 @@ export function createExtensionRuntime({
     }
 
     pluginBriefings = config?.briefings ?? [];
-    const tools = [...coreTools, ...(config?.tools ?? [])];
+    const tools = [...coreTools, ...guardPluginTools(config?.plugins ?? [], pluginFailures)];
 
     session = await joinSession({ tools, hooks });
 
@@ -265,6 +315,17 @@ export function createExtensionRuntime({
       // File-only registration detail (id/name) for the log; the human-facing
       // confirmation is the single terminal line below.
       relayLog(`registered id=${String(self.id ?? "").slice(0, 8)} name=${self.name}`);
+      // Plugins act on the mesh for the first time here — after registration, before
+      // the session is announced as ready. A plugin that throws is contained: its own
+      // tools report the failure, everything else carries on.
+      for (const [name, message] of await activatePlugins({
+        plugins: config.plugins ?? [],
+        relay: pluginRelayFacade(relay),
+        self,
+        log: relayLog,
+      })) {
+        pluginFailures.set(name, message);
+      }
       // The ONE line the user sees in the terminal on a successful join (🌐 = the
       // agent-mesh heritage icon). `config.remote` is true when a plugin supplied the
       // transport, false on the local default.

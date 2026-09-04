@@ -25,8 +25,16 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url));
  *   identity:     { resolve(session) },                        // single-instance, LAST-loaded wins
  *   tools:        [ { name, description, parameters, handler } ], // aggregate — appended to core's own
  *   briefing:     "…text…",                                    // aggregate — appended to the session briefing
+ *   activate:     ({ relay, self }) => {},                     // called once, after this session registers
  * }
  * ```
+ *
+ * **`activate` is the only point a plugin can act on the mesh it just joined.** The
+ * factory runs before identity is resolved and before registration, so it can read
+ * configuration but cannot know who it turned out to be. Declared tools only run when
+ * a consumer calls them. `activate` closes that gap: it receives the resolved identity
+ * and a relay handle, and is where a plugin announces itself, reconciles state, or
+ * checks an invariant at startup.
  *
  * **Tools and briefing travel together.** A tool a consumer cannot discover is a
  * tool that does not exist for practical purposes: the tool list is the discovery
@@ -84,9 +92,8 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url));
  *   transport: { id?: string, create: (ctx: any) => import('./seams/transport.mjs').Transport } | null,
  *   credentials: import('./seams/credentials.mjs').CredentialProvider | null,
  *   identity: import('./seams/identity.mjs').IdentityProvider | null,
- *   tools: Array<object>,
  *   briefings: string[],
- *   plugins: Array<{ name: string, tools: Array<object>, briefing: string|null }>,
+ *   plugins: Array<{ name: string, tools: Array<object>, briefing: string|null, activate: Function|null }>,
  * }>}
  */
 export async function loadPlugins(ctx = {}, deps = {}) {
@@ -105,7 +112,6 @@ export async function loadPlugins(ctx = {}, deps = {}) {
     transport: null,
     credentials: null,
     identity: null,
-    tools: [],
     briefings: [],
     plugins: [],
   };
@@ -225,6 +231,7 @@ function foldRegistration({ name, registration, registry, claimedToolNames }) {
     identity: undefined,
     tools: [],
     briefing: undefined,
+    activate: undefined,
   };
   let usable = false;
 
@@ -331,25 +338,28 @@ function foldRegistration({ name, registration, registry, claimedToolNames }) {
     usable = true;
   }
 
+  if (registration.activate !== undefined) {
+    if (typeof registration.activate !== "function") throw fail(name, "activate must be a function");
+    staged.activate = registration.activate;
+    usable = true;
+  }
+
   if (!usable) throw fail(name, null); // declared no usable capability
 
   // All validated - commit. (Done last so a later throw leaves the registry untouched.)
   for (const it of staged.interceptors) registry.interceptors.push(it);
-  for (const tool of staged.tools) {
-    registry.tools.push(tool);
-    claimedToolNames.set(tool.name, name);
-  }
+  for (const tool of staged.tools) claimedToolNames.set(tool.name, name);
   if (staged.briefing !== undefined) registry.briefings.push(staged.briefing);
   if (staged.transport !== undefined) registry.transport = staged.transport;
   if (staged.credentials !== undefined) registry.credentials = staged.credentials;
   if (staged.identity !== undefined) registry.identity = staged.identity;
-  // Ordered per-plugin records keep the attribution the aggregate loses. Consumed by
-  // the activation hook in the next change, which must invoke plugins in load order
-  // and name the one that fails.
+  // Ordered per-plugin records keep the attribution the aggregate loses: activation
+  // runs in load order, and a failure has to name the plugin it came from.
   registry.plugins.push({
     name,
     tools: staged.tools,
     briefing: staged.briefing ?? null,
+    activate: staged.activate ?? null,
   });
 }
 

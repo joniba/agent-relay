@@ -187,11 +187,11 @@ re-installs or upgrades an already-installed core (run the bare `npx --yes githu
 that). Re-running `--add-plugin` **upgrades the plugin** in place and preserves the plugin's local config —
 a gitignored `.env` / `.env.*` in the plugin folder survives the upgrade.
 
-At startup, a plugin loads **your own modules** and can supply any of six capabilities — interceptors
-(guardrails / middleware), the transport, credentials, identity, **tools**, and **briefing** text (the
-Sink is wired in the entry, not via plugins) — so a capability can live in a separate,
-even **private**, repo or a local folder, never in this one. Two sources, loaded in order (env entries
-first, then the directory, alphabetically):
+At startup, a plugin loads **your own modules** and can supply any of seven capabilities — interceptors
+(guardrails / middleware), the transport, credentials, identity, **tools**, **briefing** text, and an
+**`activate`** hook (the Sink is wired in the entry, not via plugins) — so a capability can live in a
+separate, even **private**, repo or a local folder, never in this one. Two sources, loaded in order
+(env entries first, then the directory, alphabetically):
 
 | Source | How |
 |---|---|
@@ -199,9 +199,10 @@ first, then the directory, alphabetically):
 | **Plugin directory** | every top-level `*.mjs` **and** every package subfolder (`<name>/` with a `package.json`, which may carry its own `node_modules`) in `AGENT_RELAY_PLUGIN_DIR` — default the extension's **own** `plugins/` folder (next to `extension.mjs`), so an installed plugin survives core upgrades. |
 
 **Contract** — a plugin module **default-exports a factory** (it may be `async`) that returns a
-**Registration**. It may declare `interceptors` and `tools` (arrays) and one `briefing` (a string) —
-all three accumulate across plugins in load order — plus `transport`, `credentials` and `identity`,
-each single-instance, last-loaded wins. The common case — one interceptor:
+**Registration**. It may declare `interceptors` and `tools` (arrays), one `briefing` (a string) and
+one `activate` (a function) — the first three accumulate across plugins in load order — plus
+`transport`, `credentials` and `identity`, each single-instance, last-loaded wins. The common case —
+one interceptor:
 
 ```js
 // my-plugin.mjs
@@ -224,6 +225,7 @@ export default function createPlugin(ctx) {
     // identity:    { resolve(session) { /* ... */ } },  // optional
     // tools:       [ { name, description, parameters, handler } ],  // optional — see below
     // briefing:    "Use my_tool to …",                  // optional — see below
+    // activate:    ({ relay, self }) => {},             // optional — see below
   };
 }
 ```
@@ -271,6 +273,35 @@ return {
   transport connects, so a handler may run while its backing state doesn't exist yet. There is no
   readiness flag in `ctx` — track your own, and until you're ready return an ordinary failure result
   rather than throwing. A tool that doesn't touch relay state needs no gate.
+
+**Activation — the one point you can act on the mesh.** Your factory runs *before* identity is
+resolved and *before* this session registers, so it can read configuration but cannot know who the
+session turned out to be or see a single peer. Declared tools only run when a consumer calls them. So
+if a plugin needs to announce itself, reconcile state, or check an invariant at startup, there is
+nowhere to do it — that is what `activate` is for:
+
+```js
+return {
+  activate({ relay, self }) {
+    // `self` is the REGISTERED identity — the name peers will actually address.
+    // `relay` is narrowed to { sendMessage, listAgents }; lifecycle stays the host's.
+    this.me = self;
+  },
+  tools: [/* … handlers can now rely on what activate set up … */],
+};
+```
+
+It is called once, after registration and **before the session is announced as ready**, and plugins
+are activated in load order.
+
+- **A failure is contained, not fatal.** If `activate` throws, the error is logged naming your plugin
+  and **your tools** report it — but the session keeps running and messaging is unaffected. An additive
+  capability that didn't come up shouldn't take down a working relay.
+- **That is deliberately unlike loading**, which is fail-loud: a bad *registration* means the seam
+  graph itself is unknown, so there is nothing safe to run. A bad *activation* is one component
+  failing inside a graph that is otherwise fine.
+- **Your tools then fail durably, not transiently.** Calling a tool whose plugin failed to activate
+  says so and does not invite a retry — the condition will not resolve on its own.
 
 - **Trusted, not sandboxed.** Loaded modules are **your own code** — only ever the modules you point at
   via the env var / plugin dir. The loader fetches nothing and never loads anything derived from message

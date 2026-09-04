@@ -101,7 +101,13 @@ test("the session is joined exactly once", async () => {
 // -- tools --------------------------------------------------------------------
 
 test("core tools are registered, and a plugin's tools are appended after them", async () => {
-  const h = harness({ config: { tools: [aTool("assign_role")], briefings: [], plugins: [] } });
+  const h = harness({
+    config: {
+      tools: [],
+      briefings: [],
+      plugins: [{ name: "roles", tools: [aTool("assign_role")], briefing: null, activate: null }],
+    },
+  });
   await createExtensionRuntime(h.deps).start();
 
   const names = h.joined[0].tools.map((t) => t.name);
@@ -345,4 +351,180 @@ test("a teardown requested during a FAILING boot is still honoured", async () =>
   assert.equal(runtime.state().ready, false);
   assert.match(runtime.state().bootError, /transport down/);
   assert.equal(stopped, 0);
+});
+
+// -- activation ---------------------------------------------------------------
+
+test("plugins are activated after registration, in load order, before ready", async () => {
+  const seen = [];
+  const h = harness({
+    config: {
+      tools: [],
+      briefings: [],
+      plugins: [
+        { name: "first", tools: [], briefing: null, activate: async () => seen.push("first") },
+        { name: "second", tools: [], briefing: null, activate: async () => seen.push("second") },
+      ],
+    },
+  });
+  const runtime = createExtensionRuntime(h.deps);
+  await runtime.start();
+
+  assert.deepEqual(seen, ["first", "second"]);
+  assert.equal(runtime.state().ready, true);
+});
+
+test("activate receives the REGISTERED identity and a working relay handle", async () => {
+  let got = null;
+  const h = harness({
+    config: {
+      tools: [],
+      briefings: [],
+      plugins: [{ name: "p", tools: [], briefing: null, activate: async (ctx) => { got = ctx; } }],
+    },
+  });
+  await createExtensionRuntime(h.deps).start();
+
+  // The identity a plugin could not know at factory time.
+  assert.equal(got.self.name, "loon");
+  assert.equal(typeof got.relay.sendMessage, "function");
+  assert.equal(typeof got.relay.listAgents, "function");
+  // Narrowed: lifecycle stays the host's.
+  assert.equal(got.relay.stop, undefined);
+  assert.deepEqual(await got.relay.listAgents(), [{ id: "s2", name: "gull", self: false }]);
+});
+
+test("a plugin without activate is simply skipped", async () => {
+  const h = harness({
+    config: { tools: [], briefings: [], plugins: [{ name: "p", tools: [], briefing: null, activate: null }] },
+  });
+  const runtime = createExtensionRuntime(h.deps);
+  await runtime.start();
+  assert.equal(runtime.state().ready, true);
+});
+
+test("a throwing activate does NOT abort an otherwise healthy session", async () => {
+  const h = harness({
+    config: {
+      tools: [],
+      briefings: [],
+      plugins: [
+        { name: "broken", tools: [], briefing: null, activate: async () => { throw new Error("no db"); } },
+        { name: "fine", tools: [], briefing: null, activate: async () => {} },
+      ],
+    },
+  });
+  const runtime = createExtensionRuntime(h.deps);
+  await runtime.start();
+
+  // The relay is up and messaging works; only the plugin failed.
+  assert.equal(runtime.state().ready, true);
+  assert.equal(runtime.state().bootError, null);
+  // And the failure is visible, named, as a warning inside the booting window.
+  const warned = h.lines.find((l) => /plugin "broken" failed to activate: no db/.test(l.msg));
+  assert.ok(warned, "the activation failure was not reported");
+  assert.equal(warned.booting, true);
+});
+
+test("a later plugin still activates after an earlier one throws", async () => {
+  const seen = [];
+  const h = harness({
+    config: {
+      tools: [],
+      briefings: [],
+      plugins: [
+        { name: "broken", tools: [], briefing: null, activate: async () => { throw new Error("x"); } },
+        { name: "later", tools: [], briefing: null, activate: async () => seen.push("later") },
+      ],
+    },
+  });
+  await createExtensionRuntime(h.deps).start();
+  assert.deepEqual(seen, ["later"]);
+});
+
+test("tools of a plugin that failed to activate report a DURABLE failure, not 'still starting up'", async () => {
+  const h = harness({
+    config: {
+      tools: [],
+      briefings: [],
+      plugins: [
+        {
+          name: "broken",
+          tools: [aTool("assign_role")],
+          briefing: null,
+          activate: async () => { throw new Error("no db"); },
+        },
+      ],
+    },
+  });
+  await createExtensionRuntime(h.deps).start();
+
+  const assignRole = h.joined[0].tools.find((t) => t.name === "assign_role");
+  const res = await assignRole.handler({});
+  assert.equal(res.resultType, "failure");
+  assert.match(res.textResultForLlm, /plugin "broken" failed to activate: no db/);
+  // The distinction that matters: this condition never resolves, so it must not
+  // invite a retry the way core's transient not-ready message does.
+  assert.doesNotMatch(res.textResultForLlm, /try again/);
+});
+
+test("tools of a plugin that activated fine are untouched", async () => {
+  const h = harness({
+    config: {
+      tools: [],
+      briefings: [],
+      plugins: [{ name: "ok", tools: [aTool("assign_role")], briefing: null, activate: async () => {} }],
+    },
+  });
+  await createExtensionRuntime(h.deps).start();
+
+  const assignRole = h.joined[0].tools.find((t) => t.name === "assign_role");
+  const res = await assignRole.handler({});
+  assert.equal(res.resultType, "success");
+  assert.equal(res.textResultForLlm, "assign_role");
+});
+
+test("one plugin's activation failure does not disable another plugin's tools", async () => {
+  const h = harness({
+    config: {
+      tools: [],
+      briefings: [],
+      plugins: [
+        { name: "broken", tools: [aTool("bad_tool")], briefing: null, activate: async () => { throw new Error("x"); } },
+        { name: "ok", tools: [aTool("good_tool")], briefing: null, activate: async () => {} },
+      ],
+    },
+  });
+  await createExtensionRuntime(h.deps).start();
+
+  const bad = await h.joined[0].tools.find((t) => t.name === "bad_tool").handler({});
+  const good = await h.joined[0].tools.find((t) => t.name === "good_tool").handler({});
+  assert.equal(bad.resultType, "failure");
+  assert.equal(good.resultType, "success");
+});
+
+test("activation runs BEFORE the session is announced as ready", async () => {
+  // A plugin acting at activation must not observe a session the consumer could
+  // already be using, so `ready` has to flip after activation completes.
+  let readyDuringActivation = null;
+  let runtime;
+  const h = harness({
+    config: {
+      tools: [],
+      briefings: [],
+      plugins: [
+        {
+          name: "p",
+          tools: [],
+          briefing: null,
+          activate: async () => { readyDuringActivation = runtime.state().ready; },
+        },
+      ],
+    },
+  });
+  runtime = createExtensionRuntime(h.deps);
+  await runtime.start();
+
+  assert.equal(readyDuringActivation, false);
+  assert.equal(runtime.state().ready, true);
 });
