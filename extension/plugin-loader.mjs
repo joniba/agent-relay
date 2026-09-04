@@ -15,7 +15,7 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url));
  *
  * A plugin DEFAULT-exports a factory `(ctx) => Registration`, where
  * `ctx = { env, dataDir, log }`. The returned **Registration** may declare any
- * subset of four capabilities, each an implementation of an existing core seam:
+ * subset of six capabilities:
  *
  * ```js
  * {
@@ -23,8 +23,22 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url));
  *   transport:    { id?, create: (ctx) => Transport },         // single-instance, LAST-loaded wins
  *   credentials:  () => CredentialProvider,                    // single-instance, LAST-loaded wins
  *   identity:     { resolve(session) },                        // single-instance, LAST-loaded wins
+ *   tools:        [ { name, description, parameters, handler } ], // aggregate — appended to core's own
+ *   briefing:     "…text…",                                    // aggregate — appended to the session briefing
  * }
  * ```
+ *
+ * **Tools and briefing travel together.** A tool a consumer cannot discover is a
+ * tool that does not exist for practical purposes: the tool list is the discovery
+ * surface for a human reading it, but for an LLM consumer the session briefing is
+ * the actual onboarding. A plugin contributing tools should contribute briefing
+ * text naming them.
+ *
+ * **Tool names must be globally unique.** A collision is a load failure, checked
+ * three ways: within one registration, across plugins, and against the names the
+ * host reserves for its own tools (`reservedToolNames`). Silently shadowing a host
+ * tool would break the guarantee that a failed boot still leaves the host's tools
+ * able to report the failure.
  *
  * **Sources, loaded in order:**
  *   1. `env.AGENT_RELAY_PLUGINS` — a comma-separated list of module paths
@@ -42,16 +56,22 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url));
  *
  * **Fail-loud + all-or-nothing.** The opposite of a best-effort loader: ANY
  * problem with ANY plugin - import error, missing/invalid factory, an empty or
- * malformed registration, any invalid capability within it - makes this function
- * **throw immediately, naming the plugin**. There is no skipping and no
- * best-effort tier. A plugin is folded into the registry only after its WHOLE
- * registration validates (so a plugin can never load "half" of itself). A
- * MISSING plugin dir is the normal zero-plugin case (returns the empty registry);
- * a dir that exists but is UNREADABLE is a failure and throws.
+ * malformed registration, any invalid capability within it, a tool-name
+ * collision - makes this function **throw immediately, naming the plugin**. There
+ * is no skipping and no best-effort tier. A plugin is folded into the registry
+ * only after its WHOLE registration validates (so a plugin can never load "half"
+ * of itself). A MISSING plugin dir is the normal zero-plugin case (returns the
+ * empty registry); a dir that exists but is UNREADABLE is a failure and throws.
  *
- * @param {{ env?: NodeJS.ProcessEnv, dataDir?: string|null, log?: import('./seams/log.mjs').Logger }} [ctx]
+ * @param {{
+ *   env?: NodeJS.ProcessEnv,
+ *   dataDir?: string|null,
+ *   log?: import('./seams/log.mjs').Logger,
+ *   reservedToolNames?: string[],
+ * }} [ctx]
  *   `dataDir` is the per-user STATE dir handed to plugins (for their own DB/files);
  *   it no longer locates the plugin folder (that is the extension's own `plugins/`).
+ *   `reservedToolNames` are names the host owns; a plugin claiming one fails to load.
  * @param {{
  *   importer?: (url: string) => Promise<any>,
  *   readEntries?: (dir: string) => Array<{ name: string, isDirectory: boolean }>,
@@ -64,22 +84,37 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url));
  *   transport: { id?: string, create: (ctx: any) => import('./seams/transport.mjs').Transport } | null,
  *   credentials: import('./seams/credentials.mjs').CredentialProvider | null,
  *   identity: import('./seams/identity.mjs').IdentityProvider | null,
+ *   tools: Array<object>,
+ *   briefings: string[],
+ *   plugins: Array<{ name: string, tools: Array<object>, briefing: string|null }>,
  * }>}
  */
 export async function loadPlugins(ctx = {}, deps = {}) {
   const env = ctx.env ?? process.env;
   const dataDir = ctx.dataDir ?? null;
   const log = typeof ctx.log === "function" ? ctx.log : () => {};
+  const reservedToolNames = Array.isArray(ctx.reservedToolNames) ? ctx.reservedToolNames : [];
   const importer = deps.importer ?? ((url) => import(url));
   const readEntries = deps.readEntries ?? defaultReadEntries;
   const readJson = deps.readJson ?? defaultReadJson;
   const baseDir = deps.baseDir ?? SELF_DIR;
 
   const pluginCtx = { env, dataDir, log };
-  const registry = { interceptors: [], transport: null, credentials: null, identity: null };
+  const registry = {
+    interceptors: [],
+    transport: null,
+    credentials: null,
+    identity: null,
+    tools: [],
+    briefings: [],
+    plugins: [],
+  };
+  // Tool name -> the plugin that claimed it. Seeded with the host's own names so a
+  // plugin can never shadow them.
+  const claimedToolNames = new Map(reservedToolNames.map((n) => [n, null]));
 
   for (const { name, entryPath } of resolveSources(env, baseDir, readEntries, readJson)) {
-    await loadOne({ name, entryPath, pluginCtx, importer, log, registry });
+    await loadOne({ name, entryPath, pluginCtx, importer, log, registry, claimedToolNames });
   }
   return registry;
 }
@@ -158,7 +193,7 @@ function isMissingDir(err) {
  * Import + validate ONE plugin and fold it into the registry. THROWS (naming the
  * plugin) on any failure - there is no skip path.
  */
-async function loadOne({ name, entryPath, pluginCtx, importer, log, registry }) {
+async function loadOne({ name, entryPath, pluginCtx, importer, log, registry, claimedToolNames }) {
   let registration;
   try {
     const mod = await importer(pathToFileURL(entryPath).href);
@@ -168,21 +203,29 @@ async function loadOne({ name, entryPath, pluginCtx, importer, log, registry }) 
   } catch (err) {
     throw fail(name, (err && err.message) || String(err));
   }
-  foldRegistration({ name, registration, registry });
+  foldRegistration({ name, registration, registry, claimedToolNames });
   log(`plugin loaded: ${name}`);
 }
 
 /**
  * Validate a plugin's Registration in FULL, then commit it to the registry
- * (interceptors aggregate; transport/credentials/identity are last-wins). Any bad
- * field throws before ANY mutation, so a plugin is all-or-nothing.
+ * (interceptors/tools/briefings aggregate; transport/credentials/identity are
+ * last-wins). Any bad field throws before ANY mutation, so a plugin is
+ * all-or-nothing.
  */
-function foldRegistration({ name, registration, registry }) {
+function foldRegistration({ name, registration, registry, claimedToolNames }) {
   if (registration == null || typeof registration !== "object" || Array.isArray(registration)) {
     throw fail(name, "registration is empty or not an object");
   }
 
-  const staged = { interceptors: [], transport: undefined, credentials: undefined, identity: undefined };
+  const staged = {
+    interceptors: [],
+    transport: undefined,
+    credentials: undefined,
+    identity: undefined,
+    tools: [],
+    briefing: undefined,
+  };
   let usable = false;
 
   if (registration.interceptors !== undefined) {
@@ -194,6 +237,62 @@ function foldRegistration({ name, registration, registry }) {
       staged.interceptors.push(it);
     });
     if (staged.interceptors.length) usable = true;
+  }
+
+  if (registration.tools !== undefined) {
+    if (!Array.isArray(registration.tools)) throw fail(name, "tools must be an array");
+    // Names claimed by THIS registration, so a plugin colliding with itself is
+    // caught as its own error rather than as a cross-plugin one.
+    const own = new Set();
+    registration.tools.forEach((tool, i) => {
+      if (tool == null || typeof tool !== "object" || Array.isArray(tool)) {
+        throw fail(name, `tool #${i} is not an object`);
+      }
+      if (typeof tool.name !== "string" || tool.name === "") {
+        throw fail(name, `tool #${i} has no name`);
+      }
+      if (typeof tool.description !== "string" || tool.description.trim() === "") {
+        throw fail(name, `tool "${tool.name}" has no description`);
+      }
+      // The runtime turns `parameters` into the tool's JSON Schema. Validating the
+      // shape here means a malformed one fails loudly and names the plugin, rather
+      // than throwing inside joinSession — at which point there is no session left
+      // to report through and the extension simply dies.
+      if (
+        tool.parameters == null ||
+        typeof tool.parameters !== "object" ||
+        Array.isArray(tool.parameters)
+      ) {
+        throw fail(name, `tool "${tool.name}" has no parameters object`);
+      }
+      if (typeof tool.handler !== "function") {
+        throw fail(name, `tool "${tool.name}" has no handler function`);
+      }
+      if (own.has(tool.name)) {
+        throw fail(name, `declares tool "${tool.name}" more than once`);
+      }
+      if (claimedToolNames.has(tool.name)) {
+        const owner = claimedToolNames.get(tool.name);
+        throw fail(
+          name,
+          owner
+            ? `tool "${tool.name}" is already provided by plugin "${owner}"`
+            : `tool "${tool.name}" is reserved by agent-relay itself`,
+        );
+      }
+      own.add(tool.name);
+      staged.tools.push(tool);
+    });
+    if (staged.tools.length) usable = true;
+  }
+
+  if (registration.briefing !== undefined) {
+    if (typeof registration.briefing !== "string") throw fail(name, "briefing must be a string");
+    const briefing = registration.briefing.trim();
+    if (briefing) {
+      staged.briefing = briefing;
+      usable = true;
+    }
   }
 
   if (registration.transport !== undefined) {
@@ -236,9 +335,22 @@ function foldRegistration({ name, registration, registry }) {
 
   // All validated - commit. (Done last so a later throw leaves the registry untouched.)
   for (const it of staged.interceptors) registry.interceptors.push(it);
+  for (const tool of staged.tools) {
+    registry.tools.push(tool);
+    claimedToolNames.set(tool.name, name);
+  }
+  if (staged.briefing !== undefined) registry.briefings.push(staged.briefing);
   if (staged.transport !== undefined) registry.transport = staged.transport;
   if (staged.credentials !== undefined) registry.credentials = staged.credentials;
   if (staged.identity !== undefined) registry.identity = staged.identity;
+  // Ordered per-plugin records keep the attribution the aggregate loses. Consumed by
+  // the activation hook in the next change, which must invoke plugins in load order
+  // and name the one that fails.
+  registry.plugins.push({
+    name,
+    tools: staged.tools,
+    briefing: staged.briefing ?? null,
+  });
 }
 
 /** A valid interceptor is an object with at least one FUNCTION-valued lifecycle hook. */
