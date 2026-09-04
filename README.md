@@ -187,8 +187,9 @@ re-installs or upgrades an already-installed core (run the bare `npx --yes githu
 that). Re-running `--add-plugin` **upgrades the plugin** in place and preserves the plugin's local config —
 a gitignored `.env` / `.env.*` in the plugin folder survives the upgrade.
 
-At startup, a plugin loads **your own modules** and can supply any of four seams — interceptors (guardrails /
-middleware), the transport, credentials, or identity (the Sink is wired in the entry, not via plugins) — so a capability can live in a separate,
+At startup, a plugin loads **your own modules** and can supply any of six capabilities — interceptors
+(guardrails / middleware), the transport, credentials, identity, **tools**, and **briefing** text (the
+Sink is wired in the entry, not via plugins) — so a capability can live in a separate,
 even **private**, repo or a local folder, never in this one. Two sources, loaded in order (env entries
 first, then the directory, alphabetically):
 
@@ -198,9 +199,9 @@ first, then the directory, alphabetically):
 | **Plugin directory** | every top-level `*.mjs` **and** every package subfolder (`<name>/` with a `package.json`, which may carry its own `node_modules`) in `AGENT_RELAY_PLUGIN_DIR` — default the extension's **own** `plugins/` folder (next to `extension.mjs`), so an installed plugin survives core upgrades. |
 
 **Contract** — a plugin module **default-exports a factory** (it may be `async`) that returns a
-**Registration** declaring any subset of: `interceptors` (an array — every plugin's aggregate, in load
-order), `transport`, `credentials`, `identity` (each single-instance, last-loaded wins). The common
-case — one interceptor:
+**Registration** declaring any subset of: `interceptors`, `tools` and `briefing` (each an array or
+string — every plugin's aggregate, in load order), and `transport`, `credentials`, `identity` (each
+single-instance, last-loaded wins). The common case — one interceptor:
 
 ```js
 // my-plugin.mjs
@@ -221,18 +222,49 @@ export default function createPlugin(ctx) {
     // transport:   { id, create(ctx) { /* ... */ } },  // optional — see agent-relay-pg-plugin
     // credentials: () => ({ get() { /* ... */ } }),     // optional
     // identity:    { resolve(session) { /* ... */ } },  // optional
+    // tools:       [ { name, description, parameters, handler } ],  // optional — see below
+    // briefing:    "Use my_tool to …",                  // optional — see below
   };
 }
 ```
+
+**Tools and briefing.** A plugin can add tools of its own, and text describing them to the session
+briefing:
+
+```js
+return {
+  tools: [{
+    name: "my_tool",
+    description: "What it does, for the model.",
+    parameters: { type: "object", properties: { thing: { type: "string" } }, required: ["thing"] },
+    handler: async (args) => ({ textResultForLlm: "done", resultType: "success" }),
+  }],
+  briefing: "Use my_tool(thing) to do the thing.",
+};
+```
+
+- **Ship them together.** The tool list is the discovery surface for a human reading it, but for an LLM
+  consumer the **session briefing is the actual onboarding** — it is the paragraph injected at session
+  start. A tool that appears in the list but nowhere in the briefing has to be discovered some other
+  way, which in practice means it doesn't get used. Core describes its own tools and each plugin
+  describes its own; core does not hold a description of a surface it no longer solely owns.
+- **Tool names must be globally unique.** A collision is a load failure, checked three ways: within one
+  registration, across plugins, and against core's own `send_message` / `list_relay_agents`. Shadowing a
+  core tool is refused outright — otherwise a failed boot would have no working tool left to report the
+  failure through.
+- **Handlers must tolerate being called early.** Tools are registered with the runtime before the relay
+  is up, so a handler may run before it can do anything useful. Core's own tools return a "still
+  starting up" result in that window; yours should degrade in kind rather than throw.
 
 - **Trusted, not sandboxed.** Loaded modules are **your own code** — only ever the modules you point at
   via the env var / plugin dir. The loader fetches nothing and never loads anything derived from message
   content.
 - **Fail-loud + all-or-nothing.** A plugin that fails to import, isn't a factory, returns an invalid
-  registration, or declares any invalid capability makes startup **stop with a clear error naming the
-  plugin** — the extension reports **inactive** (`send_message` / `list_relay_agents` say it didn't start)
-  rather than silently running degraded. A plugin is folded in only after its WHOLE registration
-  validates. (A plugin that *hangs* is out of scope — it's trusted code.)
+  registration, declares any invalid capability, or claims a tool name already taken makes startup
+  **stop with a clear error naming the plugin** — the extension reports **inactive**
+  (`send_message` / `list_relay_agents` say it didn't start) rather than silently running degraded. A
+  plugin is folded in only after its WHOLE registration validates. (A plugin that *hangs* is out of
+  scope — it's trusted code.)
 - **Opt-in.** With no `AGENT_RELAY_PLUGINS` paths **and** no plugins in the directory, nothing loads —
   behaviour is exactly the dependency-free local default.
 

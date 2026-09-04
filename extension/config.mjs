@@ -23,6 +23,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *
  * Folding rules (from the registry):
  *   - `interceptors` aggregate (every plugin's, in load order).
+ *   - `tools` and `briefings` aggregate the same way, and are handed to the entry
+ *     rather than used for wiring — the entry registers them with the runtime.
  *   - `transport` is single-instance, last-loaded wins; when a plugin supplies one
  *     we use it and pair it with `registry.credentials ?? none`. When none does, we
  *     fall back to the local SQLite slice.
@@ -35,19 +37,26 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * @param {NodeJS.ProcessEnv} [opts.env]   Environment to read plugin config from. Defaults to `process.env`.
  * @param {string|null} [opts.dataDir]     Canonical per-user STATE dir (DB/logs), handed to plugins for their own state. Plugins are NOT located here — they live in the extension's own `plugins/` folder. May be null.
  * @param {import('./seams/log.mjs').Logger} [opts.log]   Diagnostic logger handed to plugins/transports. No-op by default.
+ * @param {string[]} [opts.reservedToolNames]  Tool names the entry owns; a plugin claiming one fails to load.
  * @returns {Promise<{
  *   identity: import('./seams/identity.mjs').IdentityProvider,
  *   credentials: import('./seams/credentials.mjs').CredentialProvider,
  *   transport: import('./seams/transport.mjs').Transport,
  *   interceptors: import('./seams/interceptor.mjs').Interceptor[],
+ *   tools: Array<object>,
+ *   briefings: string[],
+ *   plugins: Array<{ name: string, tools: Array<object>, briefing: string|null }>,
  *   remote: boolean,
  * }>}
  */
-export async function createConfig({ env = process.env, dataDir, log = () => {} } = {}) {
-  const registry = await loadPlugins({ env, dataDir, log });
+export async function createConfig({ env = process.env, dataDir, log = () => {}, reservedToolNames = [] } = {}) {
+  const registry = await loadPlugins({ env, dataDir, log, reservedToolNames });
   return {
     identity: registry.identity ?? createLocalAliasIdentity(),
     interceptors: registry.interceptors,
+    tools: registry.tools,
+    briefings: registry.briefings,
+    plugins: registry.plugins,
     // `remote` is a non-seam hint for the entry's boot/connected log lines: true when
     // a plugin supplied the transport, false on the local default. NOT used for wiring.
     remote: !!registry.transport,

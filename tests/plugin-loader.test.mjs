@@ -342,3 +342,170 @@ test("a plugin dir that exists but is unreadable throws", async () => {
     /cannot read plugin dir .*locked.*EACCES/,
   );
 });
+// -- tools + briefing (plugin-contributed capability surface) -----------------
+
+const tool = (name, extra = {}) => ({
+  name,
+  description: `does ${name}`,
+  parameters: { type: "object", properties: {} },
+  handler: async () => ({ textResultForLlm: name, resultType: "success" }),
+  ...extra,
+});
+
+test("tools aggregate across plugins in load order, and are recorded per plugin", async () => {
+  const importer = fakeImporter({
+    "a.mjs": mod(() => ({ name: "a", tools: [tool("alpha")] })),
+    "b.mjs": mod(() => ({ tools: [tool("beta"), tool("gamma")] })),
+  });
+  const reg = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/p/a.mjs,/p/b.mjs" }, dataDir: null },
+    { importer, ...noScan },
+  );
+
+  assert.deepEqual(reg.tools.map((t) => t.name), ["alpha", "beta", "gamma"]);
+  // Per-plugin records keep the attribution the aggregate loses.
+  assert.deepEqual(reg.plugins.map((p) => p.name), ["a.mjs", "b.mjs"]);
+  assert.deepEqual(reg.plugins[0].tools.map((t) => t.name), ["alpha"]);
+  assert.deepEqual(reg.plugins[1].tools.map((t) => t.name), ["beta", "gamma"]);
+});
+
+test("briefing text aggregates in load order and is trimmed; blank briefing is not a capability", async () => {
+  const importer = fakeImporter({
+    "a.mjs": mod(() => ({ briefing: "  use alpha to do things.  " })),
+    "b.mjs": mod(() => ({ briefing: "use beta as well." })),
+  });
+  const reg = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/p/a.mjs,/p/b.mjs" }, dataDir: null },
+    { importer, ...noScan },
+  );
+  assert.deepEqual(reg.briefings, ["use alpha to do things.", "use beta as well."]);
+  assert.equal(reg.plugins[0].briefing, "use alpha to do things.");
+
+  // Whitespace-only briefing declares nothing usable -> same failure as an empty registration.
+  await assert.rejects(
+    () =>
+      loadPlugins(
+        { env: { AGENT_RELAY_PLUGINS: "/p/blank.mjs" }, dataDir: null },
+        { importer: fakeImporter({ "blank.mjs": mod(() => ({ briefing: "   " })) }), ...noScan },
+      ),
+    /registered no usable capability/,
+  );
+});
+
+test("a tools-only or briefing-only registration is usable on its own", async () => {
+  const toolsOnly = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/p/t.mjs" }, dataDir: null },
+    { importer: fakeImporter({ "t.mjs": mod(() => ({ tools: [tool("solo")] })) }), ...noScan },
+  );
+  assert.equal(toolsOnly.tools.length, 1);
+
+  const briefingOnly = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/p/br.mjs" }, dataDir: null },
+    { importer: fakeImporter({ "br.mjs": mod(() => ({ briefing: "hello" })) }), ...noScan },
+  );
+  assert.deepEqual(briefingOnly.briefings, ["hello"]);
+});
+
+// -- tool-name collisions: all three forms fail loud, naming the plugin -------
+
+test("collision ACROSS plugins throws, naming the claimant and the prior owner", async () => {
+  const importer = fakeImporter({
+    "first.mjs": mod(() => ({ tools: [tool("shared")] })),
+    "second.mjs": mod(() => ({ tools: [tool("shared")] })),
+  });
+  await assert.rejects(
+    () =>
+      loadPlugins(
+        { env: { AGENT_RELAY_PLUGINS: "/p/first.mjs,/p/second.mjs" }, dataDir: null },
+        { importer, ...noScan },
+      ),
+    /plugin "second\.mjs".*tool "shared" is already provided by plugin "first\.mjs"/,
+  );
+});
+
+test("collision WITHIN one registration throws", async () => {
+  await assert.rejects(
+    () =>
+      loadPlugins(
+        { env: { AGENT_RELAY_PLUGINS: "/p/dup.mjs" }, dataDir: null },
+        {
+          importer: fakeImporter({ "dup.mjs": mod(() => ({ tools: [tool("twice"), tool("twice")] })) }),
+          ...noScan,
+        },
+      ),
+    /plugin "dup\.mjs".*declares tool "twice" more than once/,
+  );
+});
+
+test("collision with a RESERVED host tool throws — a plugin cannot shadow send_message", async () => {
+  await assert.rejects(
+    () =>
+      loadPlugins(
+        {
+          env: { AGENT_RELAY_PLUGINS: "/p/shadow.mjs" },
+          dataDir: null,
+          reservedToolNames: ["send_message", "list_relay_agents"],
+        },
+        {
+          importer: fakeImporter({ "shadow.mjs": mod(() => ({ tools: [tool("send_message")] })) }),
+          ...noScan,
+        },
+      ),
+    /plugin "shadow\.mjs".*tool "send_message" is reserved by agent-relay itself/,
+  );
+});
+
+// -- tool shape validation ----------------------------------------------------
+
+test("an invalid tool is a load failure naming the plugin (all-or-nothing)", async () => {
+  const cases = [
+    [{ tools: "nope" }, /tools must be an array/],
+    [{ tools: [null] }, /tool #0 is not an object/],
+    [{ tools: [{ handler: () => {} }] }, /tool #0 has no name/],
+    [{ tools: [{ name: "x" }] }, /tool "x" has no handler function/],
+    [{ briefing: 42 }, /briefing must be a string/],
+  ];
+  for (const [registration, pattern] of cases) {
+    await assert.rejects(
+      () =>
+        loadPlugins(
+          { env: { AGENT_RELAY_PLUGINS: "/p/bad.mjs" }, dataDir: null },
+          { importer: fakeImporter({ "bad.mjs": mod(() => registration) }), ...noScan },
+        ),
+      pattern,
+    );
+  }
+});
+
+test("a plugin that fails validation contributes NOTHING — not even its valid tools", async () => {
+  // `good` is valid and comes first; `bad` declares one valid tool then an invalid one.
+  const importer = fakeImporter({
+    "good.mjs": mod(() => ({ tools: [tool("kept")] })),
+    "bad.mjs": mod(() => ({ tools: [tool("alsoValid"), { name: "broken" }] })),
+  });
+  const registry = { seen: null };
+  await assert.rejects(
+    () =>
+      loadPlugins(
+        { env: { AGENT_RELAY_PLUGINS: "/p/good.mjs,/p/bad.mjs" }, dataDir: null },
+        { importer, ...noScan },
+      ),
+    /plugin "bad\.mjs"/,
+  );
+  void registry;
+
+  // And the name the failed plugin tried to claim is not left reserved: loading it
+  // alone, correctly, still works.
+  const ok = await loadPlugins(
+    { env: { AGENT_RELAY_PLUGINS: "/p/retry.mjs" }, dataDir: null },
+    { importer: fakeImporter({ "retry.mjs": mod(() => ({ tools: [tool("alsoValid")] })) }), ...noScan },
+  );
+  assert.deepEqual(ok.tools.map((t) => t.name), ["alsoValid"]);
+});
+
+test("zero plugins yields empty tool/briefing aggregates, not undefined", async () => {
+  const reg = await loadPlugins({ env: {}, dataDir: null }, { importer: fakeImporter({}), ...noScan });
+  assert.deepEqual(reg.tools, []);
+  assert.deepEqual(reg.briefings, []);
+  assert.deepEqual(reg.plugins, []);
+});
