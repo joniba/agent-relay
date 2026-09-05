@@ -168,8 +168,10 @@ accepts a local path. Nothing needs pushing first — but it clones, so **commit
 `up`**. Session aliases are auto-assigned (`sbx-a`, `sbx-b`, …) from whoever is already live.
 
 The pg plugin is opt-in (`--pg`) and refuses by default when it would migrate a **shared** database,
-since that locks out fresh sessions on any machine still running an older build. `node
-scripts/sandbox.mjs help` covers the local-Postgres options.
+since that locks out fresh sessions on any machine still running an older build.
+
+**Full guide — every flag, worked examples, and the local-Postgres options: [`docs/sandbox.md`](docs/sandbox.md).**
+Nothing here uses Docker; the `up`/`down` naming is borrowed, not the machinery.
 
 ## Extending (the seams)
 

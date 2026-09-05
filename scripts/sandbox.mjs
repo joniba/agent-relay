@@ -65,6 +65,11 @@ const DATA_DIR = join(SANDBOX, "data");
 const EXT_DIR = join(HOME_DIR, "extensions", "agent-relay");
 const PLUGINS_DIR = join(EXT_DIR, "plugins");
 
+// Fallback refs, used only when no sibling checkout is found. Both point at the branch
+// the capability currently lives on; drop them once it is on the plugin's default branch.
+const DEFAULT_ROLES_REF = "feature/session-roles";
+const DEFAULT_PG_REF = "feature/registry-attributes";
+
 const sandboxEnv = () => ({
   ...process.env,
   COPILOT_HOME: HOME_DIR,
@@ -193,9 +198,13 @@ function up() {
   }
   info(`${green("✓")} core installed from this checkout`);
 
-  const roles = findLocalCheckout("agent-relay-experimental-plugin");
+  // An explicit ref means "get it from GitHub at this ref" — otherwise passing one
+  // while a sibling checkout exists would silently do nothing, which is worse than
+  // either behaviour on its own.
+  const rolesRefFlag = value("--roles-ref");
+  const roles = rolesRefFlag ? null : findLocalCheckout("agent-relay-experimental-plugin");
   const rolesSpec = roles ? roles.path : "joniba/agent-relay-experimental-plugin";
-  const rolesRef = roles ? null : value("--roles-ref") ?? "feature/session-roles";
+  const rolesRef = roles ? null : rolesRefFlag ?? DEFAULT_ROLES_REF;
   info(dim(`→ installing roles plugin from ${roles ? `${roles.path} (${roles.branch})` : `GitHub @ ${rolesRef}`}`));
   const rolesArgs = [join(CORE_REPO, "scripts", "install.mjs"), "--add-plugin", rolesSpec];
   if (rolesRef) rolesArgs.push("--ref", rolesRef);
@@ -228,11 +237,12 @@ function installPg() {
     }
   }
 
-  const pg = findLocalCheckout("agent-relay-pg-plugin");
+  const pgRefFlag = value("--pg-ref");
+  const pg = pgRefFlag ? null : findLocalCheckout("agent-relay-pg-plugin");
   const spec = pg ? pg.path : "joniba/agent-relay-pg-plugin";
-  info(dim(`→ installing pg plugin from ${pg ? `${pg.path} (${pg.branch})` : "GitHub"}`));
+  info(dim(`→ installing pg plugin from ${pg ? `${pg.path} (${pg.branch})` : `GitHub @ ${pgRefFlag ?? DEFAULT_PG_REF}`}`));
   const args = [join(CORE_REPO, "scripts", "install.mjs"), "--add-plugin", spec];
-  if (!pg) args.push("--ref", value("--pg-ref") ?? "feature/registry-attributes");
+  if (!pg) args.push("--ref", pgRefFlag ?? DEFAULT_PG_REF);
   if (!run(process.execPath, args, { env: sandboxEnv(), stdio: "pipe" })) die("pg plugin install failed.");
   info(`${green("✓")} pg plugin installed`);
   if (envPath) info(`${green("✓")} will read settings from ${envPath} ${dim("(pointed at, not copied)")}`);
@@ -300,12 +310,19 @@ function help() {
 ${bold("agent-relay sandbox")} — a disposable install for testing a feature end to end.
 
   ${green("up")}        build it: core from this checkout, plus the roles plugin
-              ${dim("--pg")}            also install the pg plugin (see the warning it prints)
-              ${dim("--pg-env <path>")} settings file for it (default: your installed pg plugin's)
-              ${dim("--fresh")}         delete and rebuild from scratch
-  ${green("launch")}    open a Copilot session on it ${dim("(--name <alias>, else auto)")}
+              ${dim("--fresh")}          delete and rebuild from scratch
+              ${dim("--pg")}             also install the pg plugin (see the warning it prints)
+              ${dim("--pg-env <path>")}  settings file for it (default: your installed pg plugin's)
+              ${dim("--yes-migrate")}    accept migrating a non-local database
+              ${dim("--roles-ref <r>")}  install from GitHub at <r> instead of a local checkout
+              ${dim("--pg-ref <r>")}     same, for the pg plugin
+  ${green("launch")}    open a Copilot session on it
+              ${dim("--name <alias>")}   default: next free sbx-a, sbx-b, …
+              ${dim("<anything else>")}  passed straight to \`copilot\` (-p, --allow-all-tools, …)
   ${green("status")}    what is installed, and who is live
   ${green("down")}      delete it ${dim("(--force if sessions are still up)")}
+
+${bold("Full guide:")} docs/sandbox.md ${dim("— examples, every flag, and the pg options")}
 
 ${bold("Why this exists.")} Two variables isolate a session, and setting only the first
 silently joins your LIVE mesh instead:
@@ -316,13 +333,14 @@ silently joins your LIVE mesh instead:
 ${bold("Plugin sources are looked up, not asked for.")} A sibling checkout of a plugin repo
 is installed directly — including a worktree on a feature branch, preferred over one on
 main — because ${dim("--add-plugin")} accepts a local path. Nothing needs pushing first.
-Committed state is what gets installed, so commit before re-running ${green("up")}.
+It clones, so committed state is what gets installed: commit before re-running ${green("up")}.
 
-${bold("A local Postgres, without Docker.")} The pg plugin's integration suite and this
-sandbox both just need ${bold("a")} server. If Docker is unavailable:
+${bold("No Docker anywhere.")} The up/down vocabulary is borrowed, not the machinery — the
+sandbox is a directory, and ${green("down")} deletes it. The default sandbox runs no database
+server at all, just the SQLite file core always uses. Postgres appears only if you
+opt into that plugin, and then it needs ${bold("a")} server rather than a container:
 
-  ${dim("npm i embedded-postgres")}   # ships a real PostgreSQL binary, no daemon
-  ${dim("# then point --pg-env at a .env with AGENT_RELAY_PG_HOST=localhost")}
+  ${dim("npm i embedded-postgres")}   # a real PostgreSQL binary, no daemon
 
 An in-process engine such as PGlite is NOT enough — it accepts a single connection,
 while the transport pools several and the suite exercises advisory locks.
