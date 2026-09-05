@@ -23,8 +23,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *
  * Folding rules (from the registry):
  *   - `interceptors` aggregate (every plugin's, in load order).
- *   - `tools` and `briefings` aggregate the same way, and are handed to the entry
- *     rather than used for wiring — the entry registers them with the runtime.
+ *   - `briefings` aggregates the same way. Tools travel on the per-plugin `plugins`
+ *     records rather than a flat list, because the entry needs to know which plugin a
+ *     tool came from — to disable exactly that plugin's tools if it fails to activate.
  *   - `transport` is single-instance, last-loaded wins; when a plugin supplies one
  *     we use it and pair it with `registry.credentials ?? none`. When none does, we
  *     fall back to the local SQLite slice.
@@ -43,9 +44,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *   credentials: import('./seams/credentials.mjs').CredentialProvider,
  *   transport: import('./seams/transport.mjs').Transport,
  *   interceptors: import('./seams/interceptor.mjs').Interceptor[],
- *   tools: Array<object>,
  *   briefings: string[],
- *   plugins: Array<{ name: string, tools: Array<object>, briefing: string|null }>,
+ *   plugins: Array<{ name: string, tools: Array<object>, briefing: string|null, activate: Function|null }>,
  *   remote: boolean,
  * }>}
  */
@@ -54,7 +54,6 @@ export async function createConfig({ env = process.env, dataDir, log = () => {},
   return {
     identity: registry.identity ?? createLocalAliasIdentity(),
     interceptors: registry.interceptors,
-    tools: registry.tools,
     briefings: registry.briefings,
     plugins: registry.plugins,
     // `remote` is a non-seam hint for the entry's boot/connected log lines: true when

@@ -11,13 +11,31 @@
 //     transport never leaks,
 //   - build the runtime sink, construct the core relay, start receiving.
 //
-// This layer holds NO retry/backoff/timeout policy: connect resilience is the
-// Transport's own concern (its init() owns any retry). There is deliberately no
-// fallback to a different substrate - a connect failure propagates so the entry
-// marks the relay inactive rather than silently partitioning the mesh.
+// This layer holds NO retry/backoff/timeout policy for CONNECTING: connect
+// resilience is the Transport's own concern (its init() owns any retry). There is
+// deliberately no fallback to a different substrate - a connect failure propagates so
+// the entry marks the relay inactive rather than silently partitioning the mesh.
+//
+// It DOES hold one liveness ceiling, on `activate` (below). That is a different class
+// of thing: not a policy about reaching a substrate, but a bound on how long a third
+// party's callback may hold the boot sequence open. Without it a plugin that never
+// resolves puts core messaging behind someone else's network call, permanently and
+// silently.
 
 import { createRelay } from "./core/relay.mjs";
 import { createCopilotSink } from "./sinks/copilot.mjs";
+
+/**
+ * Ceiling on a single plugin's `activate`. Generous — the transport is already
+ * connected by this point — but bounded, because a hang here would otherwise stall
+ * the boot loop for the life of the session.
+ *
+ * The race ABANDONS the plugin's promise; it cannot cancel it. A plugin that overruns
+ * is recorded as failed and its tools say so, while its `activate` keeps running and
+ * its side effects still land. So `activate` must be safe to finish after it has been
+ * given up on — which is documented, because a plugin author cannot infer it.
+ */
+export const ACTIVATE_TIMEOUT_MS = 15_000;
 
 /**
  * Bring a fully-composed config online and start the relay.
@@ -68,4 +86,74 @@ export async function startRelaySession({ session, config, log }) {
   });
   relay.start();
   return { relay, self, transport: config.transport };
+}
+
+/**
+ * Invoke every plugin's optional `activate` once, in load order, after this session
+ * has registered and the relay exists.
+ *
+ * This is the ONLY moment a plugin can act on the mesh it just joined. Its factory
+ * ran inside `createConfig` — before identity was resolved and before `register` —
+ * so at that point it could read its configuration but could not know who it turned
+ * out to be, nor see any peer. Declared tools only run when a consumer calls them.
+ *
+ * **Failure is contained, not fatal.** A plugin whose `activate` throws is an
+ * additive capability that did not come up; the session's messaging is unaffected and
+ * must keep working. So the error is logged naming the plugin and returned to the
+ * caller, which marks that plugin's own tools as failed — rather than aborting a
+ * session that is otherwise healthy. This is deliberately unlike plugin *loading*,
+ * which is fail-loud: a bad registration means the seam graph itself is unknown, so
+ * there is nothing safe to run.
+ *
+ * @param {object} deps
+ * @param {Array<{ name: string, activate: Function|null }>} deps.plugins  In load order.
+ * @param {object} deps.relay  The handle handed to plugins (a narrowed relay facade).
+ * @param {import('./seams/identity.mjs').AgentIdentity} deps.self
+ * @param {Map<object, string>} [deps.failures]  Written THROUGH as each plugin finishes,
+ *   keyed by plugin record. Returning it only at the end left an already-failed
+ *   plugin's tools dispatching to their raw handlers while a later plugin was still
+ *   activating — and the relay is already delivering messages by then, so a turn can
+ *   run in that window.
+ * @param {number} [deps.timeoutMs]  Ceiling on a single `activate`.
+ * @param {import('./seams/log.mjs').Logger} [deps.log]
+ * @returns {Promise<Map<object, string>>}  The same map, for callers that want it.
+ */
+export async function activatePlugins({
+  plugins = [],
+  relay,
+  self,
+  failures = new Map(),
+  timeoutMs = ACTIVATE_TIMEOUT_MS,
+  log = () => {},
+}) {
+  for (const plugin of plugins) {
+    if (typeof plugin.activate !== "function") continue;
+    let timer = null;
+    try {
+      // A hang is not a throw, and without a ceiling one would block the boot loop
+      // forever — leaving every core tool reporting "still starting up" for the life
+      // of the session. `activate` is exactly where a plugin does network work, so
+      // this is reachable rather than theoretical.
+      await Promise.race([
+        plugin.activate({ relay, self }),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`activate did not finish within ${timeoutMs}ms`)),
+            timeoutMs,
+          );
+          timer.unref?.();
+        }),
+      ]);
+      log(`plugin activated: ${plugin.name}`);
+    } catch (err) {
+      const message = (err && err.message) || String(err);
+      failures.set(plugin, message);
+      log(`agent-relay: plugin "${plugin.name}" failed to activate: ${message}`, {
+        level: "warning",
+      });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  return failures;
 }
