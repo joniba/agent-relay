@@ -145,6 +145,32 @@ npx --yes github:joniba/agent-relay --add-plugin github:joniba/agent-relay-pg-pl
 
 See that repo's README for provisioning, configuration, the security model, and teardown.
 
+## Trying a change safely (the sandbox)
+
+Testing a change means installing it, and installing it overwrites the extension your running
+sessions depend on. `scripts/sandbox.mjs` builds a **disposable install** instead — a real Copilot
+session, on this working tree's code, on its own mesh:
+
+```bash
+node scripts/sandbox.mjs up        # core from this checkout + the roles plugin
+node scripts/sandbox.mjs launch    # open a session on it (again in a 2nd tab for a peer)
+node scripts/sandbox.mjs status    # what's installed, who's live
+node scripts/sandbox.mjs down      # delete it
+```
+
+Two variables do the isolating — `COPILOT_HOME` selects the extension, `AGENT_RELAY_DATA_DIR`
+selects the mesh — and setting only the first silently joins your **live** mesh instead. Automating
+that pair is most of why the script exists.
+
+The rest is lookup rather than arguments: a **sibling checkout** of a plugin repo is installed
+directly, preferring a worktree on a feature branch over one on `main`, because `--add-plugin`
+accepts a local path. Nothing needs pushing first — but it clones, so **commit before re-running
+`up`**. Session aliases are auto-assigned (`sbx-a`, `sbx-b`, …) from whoever is already live.
+
+The pg plugin is opt-in (`--pg`) and refuses by default when it would migrate a **shared** database,
+since that locks out fresh sessions on any machine still running an older build. `node
+scripts/sandbox.mjs help` covers the local-Postgres options.
+
 ## Extending (the seams)
 
 Swap any adapter by editing **only** `config.mjs` (or, for the Sink, the entry) — the core never
