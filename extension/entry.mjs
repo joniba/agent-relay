@@ -38,24 +38,33 @@ function pluginRelayFacade(relay) {
 }
 
 /**
- * Wrap each plugin tool so that, if its plugin failed to activate, calling it says so
- * instead of running against half-initialised state.
+ * Wrap each plugin tool so that a plugin which never came up says so, instead of
+ * running against half-initialised state.
  *
- * Without this a failed activation is silent at the tool surface: the handler still
- * exists and still runs, and the plugin's own not-ready guard (if it has one) reports
- * a *transient* problem for a condition that will never resolve.
+ * Two distinct conditions have to be told apart, and both were previously reported
+ * with the plugin's own transient "not ready" message:
  *
- * @param {Array<{ name: string, tools: Array<object> }>} plugins
- * @param {Map<string, string>} failures  Filled in at activation; read at call time.
+ * - the relay is not usable at all — still booting, or boot *failed*, in which case
+ *   retrying can never help and the caller needs the real reason; and
+ * - this particular plugin failed to activate while the session is otherwise healthy.
+ *
+ * @param {Array<{ tools: Array<object> }>} plugins
+ * @param {Map<object, string>} failures  Keyed by plugin RECORD, not by name: plugin
+ *   names are derived from a file or folder name and are not unique, so keying by
+ *   name let one plugin's failure disable an unrelated namesake's tools.
+ * @param {() => object|null} relayUnusable  Returns a result when the relay itself is
+ *   unusable, or null when it is fine.
  */
-function guardPluginTools(plugins, failures) {
+function guardPluginTools(plugins, failures, relayUnusable) {
   const guarded = [];
   for (const plugin of plugins) {
     for (const tool of plugin.tools) {
       guarded.push({
         ...tool,
         handler: async (args) => {
-          const failure = failures.get(plugin.name);
+          const unusable = relayUnusable();
+          if (unusable) return unusable;
+          const failure = failures.get(plugin);
           if (failure) {
             return {
               textResultForLlm:
@@ -103,9 +112,23 @@ export function createExtensionRuntime({
   let ready = false; // true only after a fully successful bootstrap (relay started)
   let bootError = null; // set if plugin loading or bootstrap failed (terminal, not transient)
   let cleanedUp = false;
-  let pluginBriefings = [];
-  /** plugin name -> activation failure message. Read by guarded tool handlers. */
+  let loadedPlugins = [];
+  /** plugin record -> activation failure message. Read by guarded tool handlers. */
   const pluginFailures = new Map();
+
+  /**
+   * Briefing text from plugins that are actually usable.
+   *
+   * Computed at call time, not at load time: `onSessionStart` runs after activation,
+   * so a plugin that failed is already known. Briefing a plugin's tools anyway would
+   * tell the consumer to reach for tools that now always fail — the same "tools and
+   * briefing travel together" rule the loader enforces, applied to the other end.
+   */
+  function pluginBriefings() {
+    return loadedPlugins
+      .filter((p) => p.briefing && !pluginFailures.has(p))
+      .map((p) => p.briefing);
+  }
 
   /** Result returned by tools before the relay is usable (booting OR boot-failed). */
   function notReadyResult() {
@@ -182,13 +205,14 @@ export function createExtensionRuntime({
       if (!ready) return {}; // don't advertise connectivity until fully registered
       // Core describes its own tools; each plugin describes its own. Core does not
       // hold a hardcoded description of a tool surface it no longer solely owns —
+      // Composed rather than hardcoded so plugin capabilities are discoverable —
       // otherwise the briefing goes stale the first time any plugin adds a tool,
       // and a plugin's tools stay undiscoverable to the consumer that matters.
       const core =
         `You are connected to agent-relay as "${self.name}". ` +
         `Use list_relay_agents to see reachable peers and send_message(to, content) to message ` +
         `another session — their replies arrive automatically as new turns (no polling).`;
-      return { additionalContext: [core, ...pluginBriefings].join("\n\n") };
+      return { additionalContext: [core, ...pluginBriefings()].join("\n\n") };
     },
     onSessionEnd: async () => {
       await shutdown();
@@ -249,8 +273,11 @@ export function createExtensionRuntime({
       bootError = (err && err.message) || String(err);
     }
 
-    pluginBriefings = config?.briefings ?? [];
-    const tools = [...coreTools, ...guardPluginTools(config?.plugins ?? [], pluginFailures)];
+    loadedPlugins = config?.plugins ?? [];
+    const tools = [
+      ...coreTools,
+      ...guardPluginTools(loadedPlugins, pluginFailures, () => (ready ? null : notReadyResult())),
+    ];
 
     session = await joinSession({ tools, hooks });
 
@@ -318,14 +345,13 @@ export function createExtensionRuntime({
       // Plugins act on the mesh for the first time here — after registration, before
       // the session is announced as ready. A plugin that throws is contained: its own
       // tools report the failure, everything else carries on.
-      for (const [name, message] of await activatePlugins({
+      await activatePlugins({
         plugins: config.plugins ?? [],
         relay: pluginRelayFacade(relay),
         self,
+        failures: pluginFailures,
         log: relayLog,
-      })) {
-        pluginFailures.set(name, message);
-      }
+      });
       // The ONE line the user sees in the terminal on a successful join (🌐 = the
       // agent-mesh heritage icon). `config.remote` is true when a plugin supplied the
       // transport, false on the local default.

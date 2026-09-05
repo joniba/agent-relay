@@ -15,7 +15,7 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url));
  *
  * A plugin DEFAULT-exports a factory `(ctx) => Registration`, where
  * `ctx = { env, dataDir, log }`. The returned **Registration** may declare any
- * subset of six capabilities:
+ * subset of seven capabilities:
  *
  * ```js
  * {

@@ -20,6 +20,13 @@ import { createRelay } from "./core/relay.mjs";
 import { createCopilotSink } from "./sinks/copilot.mjs";
 
 /**
+ * Ceiling on a single plugin's `activate`. Generous — the transport is already
+ * connected by this point — but bounded, because a hang here would otherwise stall
+ * the boot loop for the life of the session.
+ */
+export const ACTIVATE_TIMEOUT_MS = 15_000;
+
+/**
  * Bring a fully-composed config online and start the relay.
  *
  * Takes a PLAIN composed config (from `createConfig`), not a factory: identity is
@@ -91,22 +98,50 @@ export async function startRelaySession({ session, config, log }) {
  * @param {Array<{ name: string, activate: Function|null }>} deps.plugins  In load order.
  * @param {object} deps.relay  The handle handed to plugins (a narrowed relay facade).
  * @param {import('./seams/identity.mjs').AgentIdentity} deps.self
+ * @param {Map<object, string>} [deps.failures]  Written THROUGH as each plugin finishes,
+ *   keyed by plugin record. Returning it only at the end left an already-failed
+ *   plugin's tools dispatching to their raw handlers while a later plugin was still
+ *   activating — and the relay is already delivering messages by then, so a turn can
+ *   run in that window.
+ * @param {number} [deps.timeoutMs]  Ceiling on a single `activate`.
  * @param {import('./seams/log.mjs').Logger} [deps.log]
- * @returns {Promise<Map<string, string>>}  plugin name -> failure message, for those that threw.
+ * @returns {Promise<Map<object, string>>}  The same map, for callers that want it.
  */
-export async function activatePlugins({ plugins = [], relay, self, log = () => {} }) {
-  const failures = new Map();
+export async function activatePlugins({
+  plugins = [],
+  relay,
+  self,
+  failures = new Map(),
+  timeoutMs = ACTIVATE_TIMEOUT_MS,
+  log = () => {},
+}) {
   for (const plugin of plugins) {
     if (typeof plugin.activate !== "function") continue;
+    let timer = null;
     try {
-      await plugin.activate({ relay, self });
+      // A hang is not a throw, and without a ceiling one would block the boot loop
+      // forever — leaving every core tool reporting "still starting up" for the life
+      // of the session. `activate` is exactly where a plugin does network work, so
+      // this is reachable rather than theoretical.
+      await Promise.race([
+        plugin.activate({ relay, self }),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`activate did not finish within ${timeoutMs}ms`)),
+            timeoutMs,
+          );
+          timer.unref?.();
+        }),
+      ]);
       log(`plugin activated: ${plugin.name}`);
     } catch (err) {
       const message = (err && err.message) || String(err);
-      failures.set(plugin.name, message);
+      failures.set(plugin, message);
       log(`agent-relay: plugin "${plugin.name}" failed to activate: ${message}`, {
         level: "warning",
       });
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
   return failures;
