@@ -11,10 +11,16 @@
 //     transport never leaks,
 //   - build the runtime sink, construct the core relay, start receiving.
 //
-// This layer holds NO retry/backoff/timeout policy: connect resilience is the
-// Transport's own concern (its init() owns any retry). There is deliberately no
-// fallback to a different substrate - a connect failure propagates so the entry
-// marks the relay inactive rather than silently partitioning the mesh.
+// This layer holds NO retry/backoff/timeout policy for CONNECTING: connect
+// resilience is the Transport's own concern (its init() owns any retry). There is
+// deliberately no fallback to a different substrate - a connect failure propagates so
+// the entry marks the relay inactive rather than silently partitioning the mesh.
+//
+// It DOES hold one liveness ceiling, on `activate` (below). That is a different class
+// of thing: not a policy about reaching a substrate, but a bound on how long a third
+// party's callback may hold the boot sequence open. Without it a plugin that never
+// resolves puts core messaging behind someone else's network call, permanently and
+// silently.
 
 import { createRelay } from "./core/relay.mjs";
 import { createCopilotSink } from "./sinks/copilot.mjs";
@@ -23,6 +29,11 @@ import { createCopilotSink } from "./sinks/copilot.mjs";
  * Ceiling on a single plugin's `activate`. Generous — the transport is already
  * connected by this point — but bounded, because a hang here would otherwise stall
  * the boot loop for the life of the session.
+ *
+ * The race ABANDONS the plugin's promise; it cannot cancel it. A plugin that overruns
+ * is recorded as failed and its tools say so, while its `activate` keeps running and
+ * its side effects still land. So `activate` must be safe to finish after it has been
+ * given up on — which is documented, because a plugin author cannot infer it.
  */
 export const ACTIVATE_TIMEOUT_MS = 15_000;
 

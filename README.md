@@ -302,6 +302,13 @@ are activated in load order.
   failing inside a graph that is otherwise fine.
 - **Your tools then fail durably, not transiently.** Calling a tool whose plugin failed to activate
   says so and does not invite a retry — the condition will not resolve on its own.
+- **You have 15 seconds.** `activate` is where a plugin does network work, so it is bounded: an
+  unresolved callback here would otherwise put core messaging behind a third party's network call,
+  permanently and silently. Overrun is recorded exactly like a throw.
+- **A timed-out `activate` is abandoned, not cancelled.** Nothing can stop a promise that is already
+  running, so after the ceiling fires your plugin is marked failed and its tools say so — while your
+  `activate` keeps going and its side effects still land. Write it so that finishing after it has
+  been given up on is safe; if it must not half-apply, make it idempotent or do the write last.
 
 - **Trusted, not sandboxed.** Loaded modules are **your own code** — only ever the modules you point at
   via the env var / plugin dir. The loader fetches nothing and never loads anything derived from message
