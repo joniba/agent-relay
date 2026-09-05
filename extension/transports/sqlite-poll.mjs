@@ -63,9 +63,15 @@ export function createSqlitePollTransport({
           id             TEXT PRIMARY KEY,
           name           TEXT NOT NULL,
           registered_at  TEXT NOT NULL,
-          last_heartbeat TEXT NOT NULL
+          last_heartbeat TEXT NOT NULL,
+          attributes     TEXT NOT NULL DEFAULT '{}'
         )
       `);
+      // An install created before `attributes` existed keeps its own table, and the
+      // installer deliberately preserves the runtime DB across upgrades — so
+      // CREATE TABLE IF NOT EXISTS above is a no-op for it and would leave every
+      // later query referencing a column that isn't there. Add it idempotently.
+      addColumnIfMissing(db, "agents", "attributes", "TEXT NOT NULL DEFAULT '{}'");
       db.exec(`
         CREATE TABLE IF NOT EXISTS messages (
           id            TEXT PRIMARY KEY,
@@ -114,10 +120,13 @@ export function createSqlitePollTransport({
           identity.name = name;
         }
         db.prepare(
-          `INSERT INTO agents (id, name, registered_at, last_heartbeat)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET name = excluded.name, last_heartbeat = excluded.last_heartbeat`,
-        ).run(identity.id, name, ts, ts);
+          `INSERT INTO agents (id, name, registered_at, last_heartbeat, attributes)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             name = excluded.name,
+             last_heartbeat = excluded.last_heartbeat,
+             attributes = json_patch(COALESCE(agents.attributes, '{}'), excluded.attributes)`,
+        ).run(identity.id, name, ts, ts, JSON.stringify(identity.attributes ?? {}));
         db.exec("COMMIT");
       } catch (err) {
         try {
@@ -136,9 +145,46 @@ export function createSqlitePollTransport({
     async listAgents() {
       const cutoff = new Date(Date.now() - staleMs).toISOString();
       const rows = db
-        .prepare("SELECT id, name FROM agents WHERE last_heartbeat >= ? ORDER BY name")
+        .prepare("SELECT id, name, attributes FROM agents WHERE last_heartbeat >= ? ORDER BY name")
         .all(cutoff);
-      return rows.map((r) => ({ id: r.id, name: r.name }));
+      return rows.map((r) => {
+        const attributes = safeParse(r.attributes);
+        // Omit the bag entirely when empty, so a session that publishes nothing looks
+        // exactly as it did before attributes existed.
+        return Object.keys(attributes).length ? { id: r.id, name: r.name, attributes } : { id: r.id, name: r.name };
+      });
+    },
+
+    /**
+     * PATCH the attributes of one agent. Keys present are set; keys ABSENT are left
+     * alone; a key whose value is NULL is removed.
+     *
+     * The merge happens **in the database** (`json_patch`, RFC 7396) rather than as a
+     * read-modify-write here. That matters: two sessions patching *different* keys on
+     * the same entry concurrently would otherwise clobber each other, since each would
+     * read the whole bag, edit its copy and write it back — defeating the point of
+     * keeping one key per fact.
+     */
+    async setAttributes({ id, attributes, force = false } = {}) {
+      const target = id ?? self.id;
+      if (attributes == null || typeof attributes !== "object" || Array.isArray(attributes)) {
+        return { ok: false, error: "'attributes' must be an object" };
+      }
+      // Writing another session's entry changes the state of something that is running
+      // and will not be told. It stays possible — this is a trusted mesh — but it has
+      // to be asked for explicitly rather than happening by default.
+      if (target !== self.id && !force) {
+        return {
+          ok: false,
+          error: `refusing to write attributes on another session (${target}) without force`,
+        };
+      }
+      const info = db
+        .prepare("UPDATE agents SET attributes = json_patch(COALESCE(attributes, '{}'), ?) WHERE id = ?")
+        .run(JSON.stringify(attributes), target);
+      if (info.changes === 0) return { ok: false, error: `no such agent: ${target}` };
+      const row = db.prepare("SELECT attributes FROM agents WHERE id = ?").get(target);
+      return { ok: true, attributes: safeParse(row.attributes) };
     },
 
     async send(message) {
@@ -268,4 +314,16 @@ function safeParse(json) {
   } catch {
     return {};
   }
+}
+
+/**
+ * Add a column only if the table doesn't already have it — the idempotent stand-in
+ * for a migration framework this transport doesn't have. SQLite's
+ * `ALTER TABLE … ADD COLUMN` throws when the column exists, and there is no
+ * `IF NOT EXISTS` form for it.
+ */
+function addColumnIfMissing(db, table, column, declaration) {
+  const existing = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (existing.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`);
 }

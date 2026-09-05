@@ -26,6 +26,16 @@
  *   first). When present, a registry MAY register this session under the first
  *   candidate not already taken by another session (collision avoidance) and
  *   reflect the chosen name back on `name`. When absent, `name` is used as-is.
+ * @property {Record<string, string>} [attributes]
+ *   OPTIONAL facts this session publishes about ITSELF onto its registry entry —
+ *   returned to peers by {@link Transport.listAgents} and rendered generically in
+ *   the roster. The core interprets no key.
+ *
+ *   Supplying these at `register` is how a session states them initially; a
+ *   transport MUST **merge** rather than replace, leaving keys it was not given
+ *   intact. That matters because a resuming session supplies none of them — they
+ *   live in the store, not in its configuration — so replacing would silently
+ *   erase everything it had published.
  */
 
 /**

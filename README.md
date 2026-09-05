@@ -303,6 +303,33 @@ are activated in load order.
 - **Your tools then fail durably, not transiently.** Calling a tool whose plugin failed to activate
   says so and does not invite a retry — the condition will not resolve on its own.
 
+**Session attributes — publishing facts about yourself.** The relay handle also carries
+`setAttributes`, which writes key/value facts onto a session's own registry entry. Peers see them on
+`list_relay_agents`, and the roster renders them without core interpreting a single key:
+
+```js
+activate({ relay, self }) {
+  relay.setAttributes({ attributes: { "role.code-owner": new Date().toISOString() } });
+}
+```
+
+- **PATCH, not replace.** Keys you send are set; keys you don't are left alone; a key whose value is
+  `null` is **removed** and never stored. The merge happens in the store, not in JavaScript, so two
+  sessions patching *different* keys at the same time don't clobber each other.
+- **Writing another session's entry needs `force: true`.** That write changes the state of something
+  that is running and will not be told, so it has to be asked for rather than happening by default.
+  It's a convention, not a wall — the mesh is trusted and nothing stops you setting the flag. The
+  point is that the dangerous call looks dangerous.
+- **Dotted keys group in the roster.** `role.owner` and `role.reviewer` render as `role: owner,
+  reviewer`, values omitted. Purely structural — core groups on the dot and still knows nothing about
+  what a key means. Values stay available through the API.
+- **It's an optional transport capability.** A transport that doesn't implement it gets you a clear
+  "not supported by the active transport" result rather than a crash.
+- **Attributes live as long as the registry entry does**, which differs by transport. The local SQLite
+  transport *deletes* a session's entry on a graceful exit, so its attributes go with it; the
+  cross-machine Postgres transport marks the session offline and keeps the entry, so a resumed session
+  still has them.
+
 - **Trusted, not sandboxed.** Loaded modules are **your own code** — only ever the modules you point at
   via the env var / plugin dir. The loader fetches nothing and never loads anything derived from message
   content.

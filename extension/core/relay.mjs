@@ -131,10 +131,30 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
     transport.startReceiving((message) => onInbound(message));
   }
 
+  /**
+   * Publish facts about a session onto its registry entry. PATCH semantics: keys
+   * present are set, keys absent are untouched, a `null` value removes the key.
+   * Defaults to this session; writing another's requires `force`.
+   *
+   * Feature-detected, because attribute storage is an OPTIONAL transport capability —
+   * a transport that predates it (or a third-party one) should produce a clear result
+   * rather than a TypeError on an undefined method.
+   *
+   * @param {{ id?: string, attributes: Record<string, string|null>, force?: boolean }} args
+   */
+  async function setAttributes({ id, attributes, force } = {}) {
+    if (typeof transport.setAttributes !== "function") {
+      return { ok: false, error: "attributes aren't supported by the active transport" };
+    }
+    const result = await transport.setAttributes({ id: id ?? self.id, attributes, force });
+    if (result && result.ok) note(`attributes set on ${(id ?? self.id).slice(0, 8)}`);
+    return result;
+  }
+
   /** Stop receiving and release transport resources. */
   async function stop() {
     await transport.stop();
   }
 
-  return { sendMessage, listAgents, start, stop };
+  return { sendMessage, listAgents, setAttributes, start, stop };
 }

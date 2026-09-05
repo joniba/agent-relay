@@ -34,6 +34,7 @@ function pluginRelayFacade(relay) {
   return {
     sendMessage: (args) => relay.sendMessage(args),
     listAgents: () => relay.listAgents(),
+    setAttributes: (args) => relay.setAttributes(args),
   };
 }
 
