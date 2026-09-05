@@ -357,6 +357,10 @@ async activate({ relay, self }) {
 - **`await` it.** `activate` is awaited and its failures are contained, so an awaited rejection is
   reported against your plugin. A floating promise escapes that containment entirely — Node
   terminates the process on an unhandled rejection by default.
+- **The target session is named by `id`.** Omit it and you write your own entry. Unknown options are
+  rejected rather than ignored, because every near-miss for that name (`sessionId`, `to`, `target`)
+  would otherwise be dropped silently, redirect the write to *your* entry, and still return
+  `ok: true` — and `force` gives no signal either, since it is accepted on a self-write.
 - **PATCH, not replace.** Keys you send are set; keys you don't are left alone; a key whose value is
   `null` is **removed** and never stored. The merge happens in the store, not in JavaScript, so two
   sessions patching *different* keys at the same time don't clobber each other. Two patches of the

@@ -140,9 +140,25 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
    * a transport that predates it (or a third-party one) should produce a clear result
    * rather than a TypeError on an undefined method.
    *
+   * Unknown keys are REJECTED rather than ignored. The target session is named by `id`,
+   * and every near-miss for that name (`sessionId`, `to`, `target`) would otherwise be
+   * dropped by destructuring, silently redirecting the write to the caller's own entry
+   * and returning `ok: true` — a wrong write reported as a right one, and `force` gives
+   * no signal either since it is accepted on a self-write.
+   *
    * @param {{ id?: string, attributes: Record<string, string|null>, force?: boolean }} args
    */
-  async function setAttributes({ id, attributes, force } = {}) {
+  async function setAttributes(args = {}) {
+    const unknown = Object.keys(args).filter((k) => !["id", "attributes", "force"].includes(k));
+    if (unknown.length) {
+      return {
+        ok: false,
+        error:
+          `unknown setAttributes option(s): ${unknown.join(", ")}. ` +
+          `The target session is named by 'id'; the call takes { id?, attributes, force? }`,
+      };
+    }
+    const { id, attributes, force } = args;
     if (typeof transport.setAttributes !== "function") {
       return { ok: false, error: "attributes aren't supported by the active transport" };
     }

@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createSqlitePollTransport } from "../extension/transports/sqlite-poll.mjs";
 import { createNoneCredentials } from "../extension/credentials/none.mjs";
 import { formatRoster } from "../extension/roster.mjs";
+import { createRelay } from "../extension/core/relay.mjs";
 
 const credentials = createNoneCredentials();
 
@@ -362,6 +363,31 @@ test("patching an agent that no longer exists returns a result, never throws", a
     });
     assert.equal(res.ok, false);
     assert.match(res.error, /no such agent: s-gone/);
+  } finally {
+    await t.stop();
+    cleanup();
+  }
+});
+
+test("setAttributes REJECTS an unknown option instead of silently writing self", async () => {
+  // Every near-miss for `id` would otherwise be dropped by destructuring, redirecting
+  // the write to the caller's own entry and returning ok:true — a wrong write reported
+  // as a right one. `force` gives no signal either, since it is fine on a self-write.
+  const { dbPath, cleanup } = tempDb();
+  const t = await up(dbPath, { ...me });
+  try {
+    await t.register(other);
+    await t.register(me); // re-assert self after registering the peer
+
+    const relay = createRelay({ sink: { wake: async () => {} }, self: me, transport: t, interceptors: [] });
+    for (const key of ["sessionId", "to", "target"]) {
+      const res = await relay.setAttributes({ [key]: other.id, attributes: { x: "1" }, force: true });
+      assert.equal(res.ok, false, `${key} must not be accepted`);
+      assert.match(res.error, /unknown setAttributes option/);
+    }
+    // And the correct spelling still works.
+    const ok = await relay.setAttributes({ id: other.id, attributes: { x: "1" }, force: true });
+    assert.equal(ok.ok, true);
   } finally {
     await t.stop();
     cleanup();
