@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { createExtensionRuntime } from "../extension/entry.mjs";
+import { activatePlugins } from "../extension/bootstrap.mjs";
 
 // The boot sequence used to be top-level in extension.mjs and therefore untestable.
 // These exercise the part that matters most about the reorder: plugins now load
@@ -219,7 +220,13 @@ test("a throw after the relay is built leaves the session NOT ready", async () =
 
 test("the briefing composes core's text with every plugin's, in order", async () => {
   const h = harness({
-    config: { tools: [], briefings: ["Use assign_role to tag a session.", "Second plugin note."], plugins: [] },
+    config: {
+      tools: [],
+      plugins: [
+        { name: "a", tools: [], briefing: "Use assign_role to tag a session.", activate: null },
+        { name: "b", tools: [], briefing: "Second plugin note.", activate: null },
+      ],
+    },
   });
   const runtime = createExtensionRuntime(h.deps);
   await runtime.start();
@@ -235,11 +242,162 @@ test("the briefing composes core's text with every plugin's, in order", async ()
   );
 });
 
+test("a plugin that failed to activate is left OUT of the briefing", async () => {
+  // Tools and briefing travel together at load; they have to travel together at
+  // failure too, or the consumer is told to reach for tools that always fail.
+  const h = harness({
+    config: {
+      tools: [],
+      plugins: [
+        {
+          name: "broken",
+          tools: [],
+          briefing: "Use assign_role to tag a session.",
+          activate: () => {
+            throw new Error("boom");
+          },
+        },
+        { name: "fine", tools: [], briefing: "Second plugin note.", activate: null },
+      ],
+    },
+  });
+  const runtime = createExtensionRuntime(h.deps);
+  await runtime.start();
+
+  const { additionalContext } = await runtime.state().hooks.onSessionStart();
+  assert.doesNotMatch(additionalContext, /assign_role/, "a dead plugin must not be advertised");
+  assert.match(additionalContext, /Second plugin note\./);
+});
+
 test("no briefing is advertised until the relay is ready", async () => {
   const h = harness({ config: { tools: [], briefings: ["never seen"], plugins: [] } });
   const runtime = createExtensionRuntime(h.deps);
 
   assert.deepEqual(await runtime.state().hooks.onSessionStart(), {});
+});
+
+// -- plugin tools vs. boot state ----------------------------------------------
+
+test("a plugin tool reports the BOOT failure, not a transient retry, when boot failed", async () => {
+  // The relay never came up, so this plugin's activate never ran and no activation
+  // failure was recorded. Falling through to the raw handler here let the plugin
+  // report its own "try again in a moment" for a state that never resolves.
+  let ran = false;
+  const h = harness({
+    config: {
+      tools: [],
+      plugins: [
+        {
+          name: "p",
+          tools: [
+            {
+              name: "p_tool",
+              description: "",
+              parameters: { type: "object", properties: {} },
+              handler: async () => {
+                ran = true;
+                return { textResultForLlm: "RAW", resultType: "success" };
+              },
+            },
+          ],
+          briefing: null,
+          activate: null,
+        },
+      ],
+    },
+  });
+  h.deps.startRelaySession = async () => {
+    throw new Error("transport down");
+  };
+  const runtime = createExtensionRuntime(h.deps);
+  await runtime.start();
+
+  const tool = h.joined[0].tools.find((t) => t.name === "p_tool");
+  const res = await tool.handler({});
+  assert.equal(ran, false, "the raw handler must not run against a dead relay");
+  assert.match(res.textResultForLlm, /failed to start: transport down/);
+  assert.doesNotMatch(res.textResultForLlm, /try again in a moment/);
+});
+
+test("an activation failure is recorded IMMEDIATELY, not after the whole loop", async () => {
+  // The relay is already delivering messages during activation, so a later plugin's
+  // slow activate leaves a window in which an earlier failure must already be visible.
+  const failures = new Map();
+  const broken = {
+    name: "broken",
+    tools: [],
+    briefing: null,
+    activate: () => {
+      throw new Error("boom");
+    },
+  };
+  let seenDuringSlowActivate = null;
+  const slow = {
+    name: "slow",
+    tools: [],
+    briefing: null,
+    activate: async () => {
+      seenDuringSlowActivate = failures.get(broken);
+    },
+  };
+
+  await activatePlugins({ plugins: [broken, slow], relay: {}, self: {}, failures });
+
+  assert.equal(seenDuringSlowActivate, "boom", "the failure must be visible before the loop ends");
+  assert.equal(failures.get(slow), undefined);
+});
+
+test("a plugin whose activate HANGS is bounded, so boot cannot stall forever", async () => {
+  // A hang is not a throw. Without a ceiling the boot loop never finishes and every
+  // core tool reports "still starting up" for the life of the session.
+  const failures = new Map();
+  const hanging = { name: "hanging", tools: [], briefing: null, activate: () => new Promise(() => {}) };
+
+  await activatePlugins({
+    plugins: [hanging],
+    relay: {},
+    self: {},
+    failures,
+    timeoutMs: 20,
+  });
+
+  assert.match(failures.get(hanging), /did not finish within 20ms/);
+});
+
+test("one plugin's failure does not disable a same-named plugin's tools", async () => {
+  // Plugin names come from a file or folder name and are not unique — two entries in
+  // AGENT_RELAY_PLUGINS are both called index.mjs.
+  const mk = (toolName, activate) => ({
+    name: "index.mjs",
+    tools: [
+      {
+        name: toolName,
+        description: "",
+        parameters: { type: "object", properties: {} },
+        handler: async () => ({ textResultForLlm: "RAN", resultType: "success" }),
+      },
+    ],
+    briefing: null,
+    activate,
+  });
+  const h = harness({
+    config: {
+      tools: [],
+      plugins: [
+        mk("a_tool", () => {
+          throw new Error("boom");
+        }),
+        mk("b_tool", null),
+      ],
+    },
+  });
+  const runtime = createExtensionRuntime(h.deps);
+  await runtime.start();
+
+  const a = await h.joined[0].tools.find((t) => t.name === "a_tool").handler({});
+  const b = await h.joined[0].tools.find((t) => t.name === "b_tool").handler({});
+  assert.match(a.textResultForLlm, /failed to activate: boom/);
+  assert.equal(b.textResultForLlm, "RAN", "the healthy namesake must still work");
 });
 
 // -- buffered diagnostics -----------------------------------------------------
