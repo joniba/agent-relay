@@ -316,25 +316,41 @@ are activated in load order.
 
 ```js
 async activate({ relay, self }) {
-  await relay.setAttributes({ attributes: { "role.code-owner": new Date().toISOString() } });
+  const res = await relay.setAttributes({
+    attributes: { "role.code-owner": new Date().toISOString() },
+  });
+  // It REPORTS failure, it does not throw one — see below.
+  if (!res.ok) throw new Error(`could not publish role: ${res.error}`);
 }
 ```
 
+- **It reports failure by returning, not by throwing.** Every call resolves to
+  `{ ok: true, attributes }` or `{ ok: false, error }`. Nothing inspects that for you: a plugin whose
+  publish silently failed is still logged as activated, with its tools enabled and its briefing
+  present. If publishing is a precondition for your plugin being useful, check `ok` and throw — that
+  is what turns it into a contained activation failure. If it's best-effort, log it and carry on. What
+  you must not do is ignore it.
+- **`relay.setAttributes` always exists; support does not.** It is an optional *transport* capability,
+  so the function is always there and a transport that doesn't implement it returns a clear
+  "not supported by the active transport" result. Feature-detecting on `typeof` tells you nothing.
 - **`await` it.** `activate` is awaited and its failures are contained, so an awaited rejection is
   reported against your plugin. A floating promise escapes that containment entirely — Node
   terminates the process on an unhandled rejection by default.
 - **PATCH, not replace.** Keys you send are set; keys you don't are left alone; a key whose value is
   `null` is **removed** and never stored. The merge happens in the store, not in JavaScript, so two
-  sessions patching *different* keys at the same time don't clobber each other.
+  sessions patching *different* keys at the same time don't clobber each other. Two patches of the
+  *same* key are ordinary last-writer-wins.
+- **Values are strings.** That is the portable contract every transport has to honour, with `null`
+  reserved for deletion. A given transport may happen to round-trip richer JSON — the local one does —
+  but a plugin that relies on it stops working the moment someone installs a different transport.
 - **Writing another session's entry needs `force: true`.** That write changes the state of something
   that is running and will not be told, so it has to be asked for rather than happening by default.
   It's a convention, not a wall — the mesh is trusted and nothing stops you setting the flag. The
   point is that the dangerous call looks dangerous.
 - **Dotted keys group in the roster.** `role.owner` and `role.reviewer` render as `role: owner,
   reviewer`, values omitted. Purely structural — core groups on the dot and still knows nothing about
-  what a key means. Values stay available through the API.
-- **It's an optional transport capability.** A transport that doesn't implement it gets you a clear
-  "not supported by the active transport" result rather than a crash.
+  what a key means. Values stay available through the API. A key whose value is the empty string is
+  omitted from the roster entirely, so don't use `""` as a presence marker; use any non-empty value.
 - **Attributes live as long as the registry entry does**, which differs by transport. The local SQLite
   transport *deletes* a session's entry on a graceful exit, so its attributes go with it; the
   cross-machine Postgres transport marks the session offline and keeps the entry, so a resumed session
