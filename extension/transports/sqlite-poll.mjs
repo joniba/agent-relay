@@ -125,7 +125,7 @@ export function createSqlitePollTransport({
            ON CONFLICT(id) DO UPDATE SET
              name = excluded.name,
              last_heartbeat = excluded.last_heartbeat,
-             attributes = json_patch(COALESCE(agents.attributes, '{}'), excluded.attributes)`,
+             attributes = json_patch(${VALID_ATTRIBUTES_OF("agents")}, excluded.attributes)`,
         ).run(identity.id, name, ts, ts, JSON.stringify(identity.attributes ?? {}));
         db.exec("COMMIT");
       } catch (err) {
@@ -179,11 +179,19 @@ export function createSqlitePollTransport({
           error: `refusing to write attributes on another session (${target}) without force`,
         };
       }
-      const info = db
-        .prepare("UPDATE agents SET attributes = json_patch(COALESCE(attributes, '{}'), ?) WHERE id = ?")
-        .run(JSON.stringify(attributes), target);
-      if (info.changes === 0) return { ok: false, error: `no such agent: ${target}` };
-      const row = db.prepare("SELECT attributes FROM agents WHERE id = ?").get(target);
+      // A single statement, so the returned bag is guaranteed to be the state this
+      // patch produced — and so a target that deregisters between the write and the
+      // read cannot turn a contractual { ok, error } into a TypeError. `deregister`
+      // hard-deletes, and force-writing a peer is exactly what `force` is for, so
+      // "patch a peer while it exits" is the intended call racing the intended
+      // teardown rather than a hypothetical.
+      const row = db
+        .prepare(
+          `UPDATE agents SET attributes = json_patch(${VALID_ATTRIBUTES_OF()}, ?)
+           WHERE id = ? RETURNING attributes`,
+        )
+        .get(JSON.stringify(attributes), target);
+      if (!row) return { ok: false, error: `no such agent: ${target}` };
       return { ok: true, attributes: safeParse(row.attributes) };
     },
 
@@ -307,6 +315,22 @@ export function createSqlitePollTransport({
     },
   };
 }
+
+/**
+ * The attributes column as a *patchable* expression.
+ *
+ * The read path already tolerates a bad column value (`safeParse`); the write path
+ * must too, or the two disagree about whether one is survivable. `json_patch` raises
+ * on malformed JSON, and that throw happens inside `register` — so a single bad row
+ * would not cost a session its attributes, it would cost it the relay entirely, on
+ * every start, with no way back short of `--purge`. This also subsumes the NULL case.
+ *
+ * @param {string} [table]  Qualify the column when the statement needs it (upserts).
+ */
+const VALID_ATTRIBUTES_OF = (table) => {
+  const col = table ? `${table}.attributes` : "attributes";
+  return `CASE WHEN json_valid(${col}) THEN ${col} ELSE '{}' END`;
+};
 
 function safeParse(json) {
   try {

@@ -308,11 +308,14 @@ are activated in load order.
 `list_relay_agents`, and the roster renders them without core interpreting a single key:
 
 ```js
-activate({ relay, self }) {
-  relay.setAttributes({ attributes: { "role.code-owner": new Date().toISOString() } });
+async activate({ relay, self }) {
+  await relay.setAttributes({ attributes: { "role.code-owner": new Date().toISOString() } });
 }
 ```
 
+- **`await` it.** `activate` is awaited and its failures are contained, so an awaited rejection is
+  reported against your plugin. A floating promise escapes that containment entirely — Node
+  terminates the process on an unhandled rejection by default.
 - **PATCH, not replace.** Keys you send are set; keys you don't are left alone; a key whose value is
   `null` is **removed** and never stored. The merge happens in the store, not in JavaScript, so two
   sessions patching *different* keys at the same time don't clobber each other.

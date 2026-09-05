@@ -322,3 +322,48 @@ test("formatRoster treats a leading or trailing dot as an ordinary key, not a na
   assert.match(line, /\.odd=a/);
   assert.match(line, /trailing\.=b/);
 });
+
+// ─── hostile column contents ─────────────────────────────────────
+
+test("a corrupt attributes value does not cost the session its relay", async () => {
+  // The read path already tolerates this (safeParse). If the WRITE path does not,
+  // json_patch raises inside register — so one bad row stops the relay starting at
+  // all, on every start, and the installer preserves the db across upgrades.
+  const { dbPath, cleanup } = tempDb();
+  const t = await up(dbPath, { ...me });
+  try {
+    const raw = new DatabaseSync(dbPath);
+    raw.prepare("UPDATE agents SET attributes = ? WHERE id = ?").run("CORRUPT", me.id);
+    raw.close();
+
+    const res = await t.setAttributes({ attributes: { "role.owner": "2026-01-01" } });
+    assert.equal(res.ok, true, "a patch must survive a bad column value");
+    assert.deepEqual(res.attributes, { "role.owner": "2026-01-01" });
+
+    await t.register(me); // the other statement that patches
+    const [agent] = await t.listAgents();
+    assert.deepEqual(agent.attributes, { "role.owner": "2026-01-01" });
+  } finally {
+    await t.stop();
+    cleanup();
+  }
+});
+
+test("patching an agent that no longer exists returns a result, never throws", async () => {
+  // deregister hard-deletes, and force-writing a peer is what force is FOR, so
+  // "patch a peer while it exits" is the intended call racing the intended teardown.
+  const { dbPath, cleanup } = tempDb();
+  const t = await up(dbPath, { ...me });
+  try {
+    const res = await t.setAttributes({
+      id: "s-gone",
+      attributes: { "role.owner": "2026-01-01" },
+      force: true,
+    });
+    assert.equal(res.ok, false);
+    assert.match(res.error, /no such agent: s-gone/);
+  } finally {
+    await t.stop();
+    cleanup();
+  }
+});
