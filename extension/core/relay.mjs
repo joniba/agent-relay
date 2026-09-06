@@ -140,11 +140,24 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
    * a transport that predates it (or a third-party one) should produce a clear result
    * rather than a TypeError on an undefined method.
    *
-   * Unknown keys are REJECTED rather than ignored. The target session is named by `id`,
-   * and every near-miss for that name (`sessionId`, `to`, `target`) would otherwise be
-   * dropped by destructuring, silently redirecting the write to the caller's own entry
-   * and returning `ok: true` — a wrong write reported as a right one, and `force` gives
-   * no signal either since it is accepted on a self-write.
+   * **Everything that is not storage is decided HERE**, so that a transport's only job
+   * is to merge a validated patch into its store. Left to the transports, each of these
+   * was decided twice and independently — and `undefined` was decided *differently*, so
+   * the same call deleted a key on one transport and silently no-opped with `ok: true`
+   * on the other. A third transport could equally satisfy the documented signature while
+   * quietly dropping `force`, and nothing would report that the guardrail was gone.
+   *
+   * Specifically:
+   * - unknown option keys are REJECTED, not ignored. Every near-miss for `id`
+   *   (`sessionId`, `to`, `target`) would otherwise be dropped by destructuring,
+   *   silently redirecting the write to the caller's own entry and returning `ok: true`.
+   * - `undefined` is normalised to `null` (a removal). It is a JavaScript artifact, not
+   *   a storable value: `JSON.stringify` drops it, so it cannot survive to any store.
+   * - non-string values are refused. Strings are the portable contract; a given
+   *   transport may happen to round-trip richer JSON, and a plugin relying on that
+   *   breaks the moment a different transport is installed.
+   * - writing another session requires `force`, checked against the identity this relay
+   *   registered with rather than anything the caller supplied.
    *
    * @param {{ id?: string, attributes: Record<string, string|null>, force?: boolean }} args
    */
@@ -159,11 +172,39 @@ export function createRelay({ sink, self, transport, interceptors = [] }) {
       };
     }
     const { id, attributes, force } = args;
+    if (attributes == null || typeof attributes !== "object" || Array.isArray(attributes)) {
+      return { ok: false, error: "'attributes' must be an object" };
+    }
+
+    const patch = {};
+    for (const [key, raw] of Object.entries(attributes)) {
+      if (raw === null || raw === undefined) {
+        patch[key] = null;
+        continue;
+      }
+      if (typeof raw !== "string") {
+        return {
+          ok: false,
+          error:
+            `attribute '${key}' must be a string or null (got ${typeof raw}). ` +
+            `Strings are the portable contract across transports.`,
+        };
+      }
+      patch[key] = raw;
+    }
+
+    const target = id ?? self.id;
+    if (target !== self.id && !force) {
+      return {
+        ok: false,
+        error: `refusing to write attributes on another session (${target}) without force`,
+      };
+    }
     if (typeof transport.setAttributes !== "function") {
       return { ok: false, error: "attributes aren't supported by the active transport" };
     }
-    const result = await transport.setAttributes({ id: id ?? self.id, attributes, force });
-    if (result && result.ok) note(`attributes set on ${(id ?? self.id).slice(0, 8)}`);
+    const result = await transport.setAttributes({ id: target, attributes: patch, force });
+    if (result && result.ok) note(`attributes set on ${target.slice(0, 8)}`);
     return result;
   }
 

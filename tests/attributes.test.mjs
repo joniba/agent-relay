@@ -299,7 +299,7 @@ test("bringing the transport up twice does not fail on the already-added column"
 
 // ─── roster rendering ────────────────────────────────────────────
 
-test("formatRoster groups dotted keys and drops their values", async () => {
+test("formatRoster groups dotted keys by prefix, keeping their values", async () => {
   const line = formatRoster([
     {
       id: "s1",
@@ -308,9 +308,18 @@ test("formatRoster groups dotted keys and drops their values", async () => {
     },
   ]);
   assert.match(line, /machine=box-a/);
-  assert.match(line, /role: owner, reviewer/);
-  // The timestamps are context nobody asked the roster for; they stay on the API.
-  assert.doesNotMatch(line, /2026-01-01/);
+  assert.match(line, /role: owner=2026-01-01, reviewer=2026-02-02/);
+});
+
+test("grouping never destroys a value, whatever the namespace means", () => {
+  // Dropping values suited the first consumer, whose values were timestamps — but
+  // "the suffix is the fact" is a property of that data model, not of dotted keys.
+  // Applied generically it silently deleted information, and a plugin could not opt
+  // out, since this renders straight into list_relay_agents.
+  const line = formatRoster([
+    { id: "s1", name: "loon", attributes: { "machine.host": "DESKTOP-20B0940", "machine.os": "win32" } },
+  ]);
+  assert.match(line, /machine: host=DESKTOP-20B0940, os=win32/);
 });
 
 test("formatRoster leaves undotted keys as key=value, sorted", () => {
@@ -388,6 +397,66 @@ test("setAttributes REJECTS an unknown option instead of silently writing self",
     // And the correct spelling still works.
     const ok = await relay.setAttributes({ id: other.id, attributes: { x: "1" }, force: true });
     assert.equal(ok.ok, true);
+  } finally {
+    await t.stop();
+    cleanup();
+  }
+});
+
+test("core normalises undefined to a removal, so transports cannot diverge on it", async () => {
+  // SQLite json_patch silently no-ops an undefined (JSON.stringify drops it) and still
+  // reports ok; Postgres deletes. Deciding it in core makes the answer the same
+  // everywhere, and it is a JavaScript artifact rather than a storable value anyway.
+  const { dbPath, cleanup } = tempDb();
+  const t = await up(dbPath, { ...me, attributes: { "role.owner": "2026-01-01" } });
+  try {
+    const relay = createRelay({ sink: { wake: async () => {} }, self: me, transport: t, interceptors: [] });
+    const res = await relay.setAttributes({ attributes: { "role.owner": undefined } });
+    assert.equal(res.ok, true);
+    assert.ok(!("role.owner" in res.attributes), "undefined must clear the key");
+  } finally {
+    await t.stop();
+    cleanup();
+  }
+});
+
+test("core refuses a non-string value rather than letting transports diverge", async () => {
+  // Strings are the portable contract. sqlite round-trips nested JSON and merges it
+  // recursively; Postgres replaces shallowly. Refusing here turns a silent difference
+  // into the same explicit failure on every transport.
+  const { dbPath, cleanup } = tempDb();
+  const t = await up(dbPath, { ...me });
+  try {
+    const relay = createRelay({ sink: { wake: async () => {} }, self: me, transport: t, interceptors: [] });
+    for (const bad of [{ a: 1 }, { a: { nested: "x" } }, { a: true }, { a: ["x"] }]) {
+      const res = await relay.setAttributes({ attributes: bad });
+      assert.equal(res.ok, false, `${JSON.stringify(bad)} must be refused`);
+      assert.match(res.error, /must be a string or null/);
+    }
+  } finally {
+    await t.stop();
+    cleanup();
+  }
+});
+
+test("core enforces the force rule itself, not only the transport", async () => {
+  // Documented as core policy but previously implemented only inside each transport,
+  // so a third transport could satisfy the signature and silently drop the guardrail.
+  const { dbPath, cleanup } = tempDb();
+  const t = await up(dbPath, { ...me });
+  try {
+    await t.register(other);
+    await t.register(me);
+    // A transport that ignores force entirely — core must still refuse.
+    const permissive = { ...t, setAttributes: async () => ({ ok: true, attributes: {} }) };
+    const relay = createRelay({ sink: { wake: async () => {} }, self: me, transport: permissive, interceptors: [] });
+
+    const refused = await relay.setAttributes({ id: other.id, attributes: { x: "1" } });
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /without force/);
+
+    const forced = await relay.setAttributes({ id: other.id, attributes: { x: "1" }, force: true });
+    assert.equal(forced.ok, true);
   } finally {
     await t.stop();
     cleanup();

@@ -372,10 +372,14 @@ async activate({ relay, self }) {
   that is running and will not be told, so it has to be asked for rather than happening by default.
   It's a convention, not a wall — the mesh is trusted and nothing stops you setting the flag. The
   point is that the dangerous call looks dangerous.
-- **Dotted keys group in the roster.** `role.owner` and `role.reviewer` render as `role: owner,
-  reviewer`, values omitted. Purely structural — core groups on the dot and still knows nothing about
-  what a key means. Values stay available through the API. A key whose value is the empty string is
-  omitted from the roster entirely, so don't use `""` as a presence marker; use any non-empty value.
+- **Dotted keys group in the roster.** `role.owner` and `role.reviewer` render as `role: owner=…,
+  reviewer=…` — the namespace named once instead of repeated, values kept. Purely structural: core
+  groups on the dot and knows nothing about what a key means. A key whose value is the empty string
+  is omitted entirely, so use any non-empty value rather than `""` as a presence marker.
+- **`force` is decided by core, not by the transport.** So is rejecting an unknown option, refusing a
+  non-string value, and treating `undefined` as a removal. A transport receives an already-validated
+  patch and only has to merge it into its store — which is why these rules hold identically on a
+  transport you install later, including one nobody has written yet.
 - **Attributes live as long as the registry entry does**, which differs by transport. The local SQLite
   transport *deletes* a session's entry on a graceful exit, so its attributes go with it; the
   cross-machine Postgres transport marks the session offline and keeps the entry, so a resumed session

@@ -22,18 +22,42 @@
  *   and reflect the chosen name back on `self.name`; otherwise it uses
  *   `self.name` as-is. Re-registering the same `id` updates its row in place.
  *
+ *   Attributes MUST be MERGED, never replaced. This is load-bearing: a resuming
+ *   session supplies none of them — they live in the registry rather than in its
+ *   configuration — so a transport that replaces silently erases everything that
+ *   session had published, on its second boot, with no error anywhere.
+ *
  * @property {(self: AgentIdentity) => Promise<void>} deregister
  *   Remove this session from discovery (called on session end).
  *
  * @property {() => Promise<AgentIdentity[]>} listAgents
- *   Return the currently-addressable peers (realizes F3 discovery). An entry MAY
- *   carry an opaque `attributes: Record<string,string>` bag the core renders in the
- *   roster but does NOT interpret (e.g. a cross-machine transport's `machine`/host).
+ *   Return the currently-addressable sessions (realizes F3 discovery). This
+ *   **INCLUDES this session's own entry**, not only peers — a consumer comparing
+ *   itself against the mesh (to reconcile a fact it published, or to resolve "me" by
+ *   the same path it resolves anyone else) needs its own row with its own attributes,
+ *   and cannot synthesise one because the stored attributes would be missing.
+ *
+ *   An entry MAY carry an opaque `attributes: Record<string,string>` bag the core
+ *   renders in the roster but does NOT interpret.
+ *
+ *   A transport MAY assert its own values into that bag, overriding what a session
+ *   published under the same key — the Postgres transport does this for `machine`,
+ *   which it derives rather than trusting. A key a transport asserts is effectively
+ *   RESERVED on that transport: a session's write to it appears to succeed and is then
+ *   invisible to peers. Transports SHOULD document any key they assert.
  *
  * @property {(args: { id?: string, attributes: Record<string, string|null>, force?: boolean }) => Promise<{ ok: boolean, attributes?: object, error?: string }>} [setAttributes]
  *   OPTIONAL capability. PATCH the attributes of one agent: keys present are set,
  *   keys ABSENT are left alone, and a key whose value is `null` is REMOVED (never
  *   stored). `id` defaults to this session.
+ *
+ *   **A transport receives an ALREADY-VALIDATED patch.** `core/relay.mjs` owns every
+ *   part of this call that is not storage — rejecting unknown options, normalising
+ *   `undefined` to `null`, refusing non-string values, and enforcing the `force` rule —
+ *   so an implementation's only job is to merge the patch into its store. Re-checking
+ *   is harmless, but a transport MUST NOT relax any of it: these were previously
+ *   decided independently per transport, and `undefined` came out differently in each,
+ *   so the same call removed a key on one and silently no-opped on the other.
  *
  *   The merge MUST happen in the store, not as a read-modify-write in JavaScript —
  *   otherwise two sessions patching *different* keys of the same entry concurrently

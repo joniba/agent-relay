@@ -23,16 +23,21 @@ export function formatRoster(agents) {
 }
 
 /**
- * Render an agent's opaque `attributes` bag as ` (k=v, prefix: a, b)` — BOTH keys and
- * values String-coerced + control-char stripped, empty entries omitted (so it is
+ * Render an agent's opaque `attributes` bag as ` (k=v, prefix: a=1, b=2)` — BOTH keys
+ * and values String-coerced + control-char stripped, empty entries omitted (so it is
  * stable and unforgeable across plugins). Core does NOT interpret any key.
  *
- * Keys sharing a **dotted prefix** are grouped and rendered as `prefix: suffix, suffix`
- * without their values. The rule is purely structural — core still knows nothing about
- * what any key means, it only groups on the dot. The reason is that the roster's reader
- * is usually a model, and the question it answers is "who holds what", not "when was it
- * set": repeating a prefix and a value per entry is context spent on something nobody
- * asked. Values remain available through the API.
+ * Keys sharing a **dotted prefix** are grouped, so a namespace is named once instead of
+ * repeated per entry. The rule is purely structural: core groups on the dot and knows
+ * nothing about what any key means.
+ *
+ * Values are KEPT. Dropping them read better for the first consumer, whose values were
+ * timestamps nobody asked about — but "the suffix is the fact, the value is bookkeeping"
+ * is a property of that one data model, not of dotted keys. Applied generically it
+ * destroys information: `machine.host=DESKTOP-20B0940` renders as `machine: host`, and
+ * a plugin cannot opt out because this is called straight from `list_relay_agents`.
+ * Core describing how to shape values to survive its own renderer would be exactly the
+ * leak this seam exists to avoid.
  *
  * @param {Record<string, unknown>} [attributes]
  * @returns {string}
@@ -52,7 +57,7 @@ function renderAttributes(attributes) {
     if (dot > 0 && dot < key.length - 1) {
       const prefix = key.slice(0, dot);
       if (!grouped.has(prefix)) grouped.set(prefix, []);
-      grouped.get(prefix).push(key.slice(dot + 1));
+      grouped.get(prefix).push(`${key.slice(dot + 1)}=${value}`);
     } else {
       plain.push(`${key}=${value}`);
     }
