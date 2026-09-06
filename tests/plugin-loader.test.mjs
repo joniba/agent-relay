@@ -397,7 +397,7 @@ test("briefing text aggregates in load order and is trimmed; blank briefing is n
     { env: { AGENT_RELAY_PLUGINS: "/p/a.mjs,/p/b.mjs" }, dataDir: null },
     { importer, ...noScan },
   );
-  assert.deepEqual(reg.briefings, ["use alpha to do things.", "use beta as well."]);
+  assert.deepEqual(reg.plugins.map((p) => p.briefing), ["use alpha to do things.", "use beta as well."]);
   assert.equal(reg.plugins[0].briefing, "use alpha to do things.");
 
   // Whitespace-only briefing declares nothing usable -> same failure as an empty registration.
@@ -422,7 +422,7 @@ test("a tools-only or briefing-only registration is usable on its own", async ()
     { env: { AGENT_RELAY_PLUGINS: "/p/br.mjs" }, dataDir: null },
     { importer: fakeImporter({ "br.mjs": mod(() => ({ briefing: "hello" })) }), ...noScan },
   );
-  assert.deepEqual(briefingOnly.briefings, ["hello"]);
+  assert.deepEqual(briefingOnly.plugins.map((p) => p.briefing), ["hello"]);
 });
 
 // -- tool-name collisions: all three forms fail loud, naming the plugin -------
@@ -524,6 +524,6 @@ test("a plugin that fails validation contributes NOTHING — not even its valid 
 
 test("zero plugins yields empty aggregates, not undefined", async () => {
   const reg = await loadPlugins({ env: {}, dataDir: null }, { importer: fakeImporter({}), ...noScan });
-  assert.deepEqual(reg.briefings, []);
+  assert.deepEqual(reg.plugins, []);
   assert.deepEqual(reg.plugins, []);
 });

@@ -110,10 +110,12 @@ export async function startRelaySession({ session, config, log }) {
  * @param {object} deps.relay  The handle handed to plugins (a narrowed relay facade).
  * @param {import('./seams/identity.mjs').AgentIdentity} deps.self
  * @param {Map<object, string>} [deps.failures]  Written THROUGH as each plugin finishes,
- *   keyed by plugin record. Returning it only at the end left an already-failed
- *   plugin's tools dispatching to their raw handlers while a later plugin was still
- *   activating — and the relay is already delivering messages by then, so a turn can
- *   run in that window.
+ *   keyed by plugin record. Returning it only at the end would leave an already-failed
+ *   plugin's tools reading a stale map while a later plugin is still activating. The
+ *   host's readiness guard happens to close that window too — tools report not-ready
+ *   for the whole activation loop — but relying on that would make this correct by
+ *   coincidence, through a guard that lives in a different file and exists for another
+ *   reason entirely.
  * @param {number} [deps.timeoutMs]  Ceiling on a single `activate`.
  * @param {import('./seams/log.mjs').Logger} [deps.log]
  * @returns {Promise<Map<object, string>>}  The same map, for callers that want it.

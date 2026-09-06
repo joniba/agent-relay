@@ -23,7 +23,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *
  * Folding rules (from the registry):
  *   - `interceptors` aggregate (every plugin's, in load order).
- *   - `briefings` aggregates the same way. Tools travel on the per-plugin `plugins`
+ *   - briefing text travels on the per-plugin `plugins`
  *     records rather than a flat list, because the entry needs to know which plugin a
  *     tool came from — to disable exactly that plugin's tools if it fails to activate.
  *   - `transport` is single-instance, last-loaded wins; when a plugin supplies one
@@ -44,7 +44,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *   credentials: import('./seams/credentials.mjs').CredentialProvider,
  *   transport: import('./seams/transport.mjs').Transport,
  *   interceptors: import('./seams/interceptor.mjs').Interceptor[],
- *   briefings: string[],
  *   plugins: Array<{ name: string, tools: Array<object>, briefing: string|null, activate: Function|null }>,
  *   remote: boolean,
  * }>}
@@ -54,7 +53,6 @@ export async function createConfig({ env = process.env, dataDir, log = () => {},
   return {
     identity: registry.identity ?? createLocalAliasIdentity(),
     interceptors: registry.interceptors,
-    briefings: registry.briefings,
     plugins: registry.plugins,
     // `remote` is a non-seam hint for the entry's boot/connected log lines: true when
     // a plugin supplied the transport, false on the local default. NOT used for wiring.

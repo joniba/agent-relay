@@ -92,7 +92,6 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url));
  *   transport: { id?: string, create: (ctx: any) => import('./seams/transport.mjs').Transport } | null,
  *   credentials: import('./seams/credentials.mjs').CredentialProvider | null,
  *   identity: import('./seams/identity.mjs').IdentityProvider | null,
- *   briefings: string[],
  *   plugins: Array<{ name: string, tools: Array<object>, briefing: string|null, activate: Function|null }>,
  * }>}
  */
@@ -112,7 +111,6 @@ export async function loadPlugins(ctx = {}, deps = {}) {
     transport: null,
     credentials: null,
     identity: null,
-    briefings: [],
     plugins: [],
   };
   // Tool name -> the plugin that claimed it. Seeded with the host's own names so a
@@ -215,7 +213,7 @@ async function loadOne({ name, entryPath, pluginCtx, importer, log, registry, cl
 
 /**
  * Validate a plugin's Registration in FULL, then commit it to the registry
- * (interceptors/tools/briefings aggregate; transport/credentials/identity are
+ * (interceptors/tools aggregate; transport/credentials/identity are
  * last-wins). Any bad field throws before ANY mutation, so a plugin is
  * all-or-nothing.
  */
@@ -349,7 +347,6 @@ function foldRegistration({ name, registration, registry, claimedToolNames }) {
   // All validated - commit. (Done last so a later throw leaves the registry untouched.)
   for (const it of staged.interceptors) registry.interceptors.push(it);
   for (const tool of staged.tools) claimedToolNames.set(tool.name, name);
-  if (staged.briefing !== undefined) registry.briefings.push(staged.briefing);
   if (staged.transport !== undefined) registry.transport = staged.transport;
   if (staged.credentials !== undefined) registry.credentials = staged.credentials;
   if (staged.identity !== undefined) registry.identity = staged.identity;

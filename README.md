@@ -331,6 +331,60 @@ are activated in load order.
   load time and stays live. Side effects your `activate` already completed are not rolled back, and
   later plugins activate normally. Registration is atomic; activation is not.
 
+**Session attributes — publishing facts about yourself.** The relay handle also carries
+`setAttributes`, which writes key/value facts onto a session's own registry entry. Peers see them on
+`list_relay_agents`, and the roster renders them without core interpreting a single key:
+
+```js
+async activate({ relay, self }) {
+  const res = await relay.setAttributes({
+    attributes: { "role.code-owner": new Date().toISOString() },
+  });
+  // It REPORTS failure, it does not throw one — see below.
+  if (!res.ok) throw new Error(`could not publish role: ${res.error}`);
+}
+```
+
+- **It reports failure by returning, not by throwing.** Every call resolves to
+  `{ ok: true, attributes }` or `{ ok: false, error }`. Nothing inspects that for you: a plugin whose
+  publish silently failed is still logged as activated, with its tools enabled and its briefing
+  present. If publishing is a precondition for your plugin being useful, check `ok` and throw — that
+  is what turns it into a contained activation failure. If it's best-effort, log it and carry on. What
+  you must not do is ignore it.
+- **`relay.setAttributes` always exists; support does not.** It is an optional *transport* capability,
+  so the function is always there and a transport that doesn't implement it returns a clear
+  "not supported by the active transport" result. Feature-detecting on `typeof` tells you nothing.
+- **`await` it.** `activate` is awaited and its failures are contained, so an awaited rejection is
+  reported against your plugin. A floating promise escapes that containment entirely — Node
+  terminates the process on an unhandled rejection by default.
+- **The target session is named by `id`.** Omit it and you write your own entry. Unknown options are
+  rejected rather than ignored, because every near-miss for that name (`sessionId`, `to`, `target`)
+  would otherwise be dropped silently, redirect the write to *your* entry, and still return
+  `ok: true` — and `force` gives no signal either, since it is accepted on a self-write.
+- **PATCH, not replace.** Keys you send are set; keys you don't are left alone; a key whose value is
+  `null` is **removed** and never stored. The merge happens in the store, not in JavaScript, so two
+  sessions patching *different* keys at the same time don't clobber each other. Two patches of the
+  *same* key are ordinary last-writer-wins.
+- **Values are strings.** That is the portable contract every transport has to honour, with `null`
+  reserved for deletion. A given transport may happen to round-trip richer JSON — the local one does —
+  but a plugin that relies on it stops working the moment someone installs a different transport.
+- **Writing another session's entry needs `force: true`.** That write changes the state of something
+  that is running and will not be told, so it has to be asked for rather than happening by default.
+  It's a convention, not a wall — the mesh is trusted and nothing stops you setting the flag. The
+  point is that the dangerous call looks dangerous.
+- **Dotted keys group in the roster.** `role.owner` and `role.reviewer` render as `role: owner=…,
+  reviewer=…` — the namespace named once instead of repeated, values kept. Purely structural: core
+  groups on the dot and knows nothing about what a key means. A key whose value is the empty string
+  is omitted entirely, so use any non-empty value rather than `""` as a presence marker.
+- **`force` is decided by core, not by the transport.** So is rejecting an unknown option, refusing a
+  non-string value, and treating `undefined` as a removal. A transport receives an already-validated
+  patch and only has to merge it into its store — which is why these rules hold identically on a
+  transport you install later, including one nobody has written yet.
+- **Attributes live as long as the registry entry does**, which differs by transport. The local SQLite
+  transport *deletes* a session's entry on a graceful exit, so its attributes go with it; the
+  cross-machine Postgres transport marks the session offline and keeps the entry, so a resumed session
+  still has them.
+
 - **Trusted, not sandboxed.** Loaded modules are **your own code** — only ever the modules you point at
   via the env var / plugin dir. The loader fetches nothing and never loads anything derived from message
   content.
