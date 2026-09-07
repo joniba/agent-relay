@@ -168,7 +168,9 @@ test("before the relay is ready, tools report a TRANSIENT not-ready state", asyn
   const { coreTools } = runtime.state();
   const listAgents = coreTools.find((t) => t.name === "list_relay_agents");
   const early = await listAgents.handler({});
-  assert.match(early.textResultForLlm, /still starting up/);
+  assert.match(early.textResultForLlm, /still connecting/);
+  // Says HOW LONG: "in a moment" invited an immediate retry that fails identically.
+  assert.match(early.textResultForLlm, /20 seconds/);
 
   // After a terminal boot failure the message becomes the actual cause, not "try again".
   await runtime.start();
@@ -213,7 +215,7 @@ test("a throw after the relay is built leaves the session NOT ready", async () =
   const listAgents = runtime.state().coreTools.find((t) => t.name === "list_relay_agents");
   const res = await listAgents.handler({});
   assert.equal(res.resultType, "failure");
-  assert.doesNotMatch(res.textResultForLlm, /still starting up/);
+  assert.doesNotMatch(res.textResultForLlm, /still connecting/);
 });
 
 // -- briefing -----------------------------------------------------------------
@@ -685,4 +687,33 @@ test("activation runs BEFORE the session is announced as ready", async () => {
 
   assert.equal(readyDuringActivation, false);
   assert.equal(runtime.state().ready, true);
+});
+
+test("the log marks the connection ATTEMPT, so a truncated log is interpretable", async () => {
+  // Bringing a remote transport up takes tens of seconds, and a session can finish
+  // and exit inside that window. Without this line the log ends at "plugin loaded",
+  // where still-connecting, died-silently, and process-exited-first all look alike.
+  const h = harness({ config: { tools: [], plugins: [], remote: true } });
+  await createExtensionRuntime(h.deps).start();
+
+  const attempt = h.lines.findIndex((l) => /connecting via remote transport/.test(l.msg));
+  const outcome = h.lines.findIndex((l) => /^registered /.test(l.msg));
+  assert.ok(attempt >= 0, "the attempt must be recorded before it is made");
+  assert.ok(outcome > attempt, "and the outcome must follow it");
+});
+
+test("the attempt line names WHICH transport, since that is what predicts the wait", async () => {
+  const h = harness({ config: { tools: [], plugins: [], remote: false } });
+  await createExtensionRuntime(h.deps).start();
+  assert.ok(h.lines.some((l) => /connecting via local transport/.test(l.msg)));
+});
+
+test("a boot that fails leaves the attempt line followed by the reason", async () => {
+  const h = harness({ config: { tools: [], plugins: [], remote: true } });
+  h.deps.startRelaySession = async () => { throw new Error("transport down"); };
+  await createExtensionRuntime(h.deps).start();
+
+  const attempt = h.lines.findIndex((l) => /connecting via remote transport/.test(l.msg));
+  const failure = h.lines.findIndex((l) => /failed to start: transport down/.test(l.msg));
+  assert.ok(attempt >= 0 && failure > attempt, "attempt then reason, in that order");
 });

@@ -23,3 +23,7 @@ node_modules/
 *.sqlite
 logs/
 .andromeda/
+
+# scratch file for composing commit messages
+.commitmsg
+
