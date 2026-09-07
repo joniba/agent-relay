@@ -187,10 +187,11 @@ re-installs or upgrades an already-installed core (run the bare `npx --yes githu
 that). Re-running `--add-plugin` **upgrades the plugin** in place and preserves the plugin's local config —
 a gitignored `.env` / `.env.*` in the plugin folder survives the upgrade.
 
-At startup, a plugin loads **your own modules** and can supply any of four seams — interceptors (guardrails /
-middleware), the transport, credentials, or identity (the Sink is wired in the entry, not via plugins) — so a capability can live in a separate,
-even **private**, repo or a local folder, never in this one. Two sources, loaded in order (env entries
-first, then the directory, alphabetically):
+At startup, a plugin loads **your own modules** and can supply any of seven capabilities — interceptors
+(guardrails / middleware), the transport, credentials, identity, **tools**, **briefing** text, and an
+**`activate`** hook (the Sink is wired in the entry, not via plugins) — so a capability can live in a
+separate, even **private**, repo or a local folder, never in this one. Two sources, loaded in order
+(env entries first, then the directory, alphabetically):
 
 | Source | How |
 |---|---|
@@ -198,9 +199,10 @@ first, then the directory, alphabetically):
 | **Plugin directory** | every top-level `*.mjs` **and** every package subfolder (`<name>/` with a `package.json`, which may carry its own `node_modules`) in `AGENT_RELAY_PLUGIN_DIR` — default the extension's **own** `plugins/` folder (next to `extension.mjs`), so an installed plugin survives core upgrades. |
 
 **Contract** — a plugin module **default-exports a factory** (it may be `async`) that returns a
-**Registration** declaring any subset of: `interceptors` (an array — every plugin's aggregate, in load
-order), `transport`, `credentials`, `identity` (each single-instance, last-loaded wins). The common
-case — one interceptor:
+**Registration**. It may declare `interceptors` and `tools` (arrays), one `briefing` (a string) and
+one `activate` (a function) — the first three accumulate across plugins in load order — plus
+`transport`, `credentials` and `identity`, each single-instance, last-loaded wins. The common case —
+one interceptor:
 
 ```js
 // my-plugin.mjs
@@ -221,24 +223,196 @@ export default function createPlugin(ctx) {
     // transport:   { id, create(ctx) { /* ... */ } },  // optional — see agent-relay-pg-plugin
     // credentials: () => ({ get() { /* ... */ } }),     // optional
     // identity:    { resolve(session) { /* ... */ } },  // optional
+    // tools:       [ { name, description, parameters, handler } ],  // optional — see below
+    // briefing:    "Use my_tool to …",                  // optional — see below
+    // activate:    ({ relay, self }) => {},             // optional — see below
   };
 }
 ```
 
+**Tools and briefing.** A plugin can add tools of its own, and text describing them to the session
+briefing.
+
+A tool is `{ name, description, parameters, handler }` — all four required. `name` must be unique
+across core's tools and every loaded plugin's; `description` is model-facing guidance for a single
+call; `parameters` is the JSON Schema for the handler's argument object; and `handler(args)` returns
+a result like `{ textResultForLlm, resultType: "success" | "failure" }`.
+
+```js
+return {
+  tools: [{
+    name: "roles_whois",
+    description: "Return the session currently holding a given role.",
+    parameters: {
+      type: "object",
+      properties: { role: { type: "string", description: "The role to look up" } },
+      required: ["role"],
+    },
+    handler: async ({ role }) => ({
+      textResultForLlm: `${role} is held by gull.`,
+      resultType: "success",
+    }),
+  }],
+  briefing: "Sessions can hold named roles. Before messaging a peer by alias, check roles_whois — " +
+            "aliases change between restarts, roles don't.",
+};
+```
+
+- **Ship briefing text with your tools.** The declaration makes a tool callable and its `description`
+  says what one call does; the briefing is context injected when a session starts, and it is where
+  *when to reach for this at all* belongs. A model rarely infers that from a schema, so a tool with no
+  briefing tends to sit unused even though it is right there in the list. Core briefs its own tools and
+  each plugin briefs its own — which is also why core no longer hardcodes a description of the tool
+  surface, since it stopped being the only thing on it.
+- **Names must not collide.** The loader rejects a duplicate within one registration, a name an
+  earlier-loaded plugin already claimed, and core's own `send_message` / `list_relay_agents`. A
+  collision fails the load rather than picking a winner. Core's names are reserved because a failed
+  boot reports through them. Prefixing your tools (`roles_`, `acme_`) is the easy way to stay clear of
+  everyone else.
+- **The host gates your handlers until the relay is ready and your plugin has activated.** Tool
+  declarations are registered with the runtime early — before the transport connects — but a call
+  arriving before then gets the host's own result (still starting up, or the boot failure), and one
+  arriving after a failed activation gets that failure. Your handler body runs only once both are
+  behind it, so it does not need its own readiness gate. It *does* need one for anything you started
+  in `activate` and deliberately did not await.
+
+**Activation — the one point you can act on the mesh.** Your factory runs *before* identity is
+resolved and *before* this session registers, so it can read configuration but cannot know who the
+session turned out to be or see a single peer. Declared tools only run when a consumer calls them. So
+if a plugin needs to announce itself, reconcile state, or check an invariant at startup, there is
+nowhere to do it — that is what `activate` is for:
+
+```js
+export default function createPlugin(ctx) {
+  // Shared state lives in the factory closure. `activate` is called on the host's own
+  // record of your plugin, and handlers are called on their individual tool objects,
+  // so `this` is NOT a way to pass anything between them.
+  let me = null;
+
+  return {
+    async activate({ relay, self }) {
+      // `self` is the REGISTERED identity — the name peers will actually address.
+      // `relay` is narrowed to { sendMessage, listAgents, setAttributes }; lifecycle
+      // stays the host's.
+      me = self;
+    },
+    tools: [/* … handlers close over `me` … */],
+  };
+}
+```
+
+It is called once, after registration and **before the session is announced as ready**, and plugins
+are activated in load order.
+
+- **It is not a barrier against traffic.** Registration and inbound delivery both start *before*
+  activation, so by the time your `activate` runs the session is already discoverable and messages can
+  already be arriving. Activation gates tools, briefing and the ready announcement — not the
+  transport. An interceptor that depends on state set up in `activate` therefore has a real race; set
+  such state in the factory instead.
+
+- **A failure is contained, not fatal.** If `activate` throws, the error is logged naming your plugin
+  and **your tools** report it — but the session keeps running and messaging is unaffected. An additive
+  capability that didn't come up shouldn't take down a working relay.
+- **That is deliberately unlike loading**, which is fail-loud: a bad *registration* means the seam
+  graph itself is unknown, so there is nothing safe to run. A bad *activation* is one component
+  failing inside a graph that is otherwise fine.
+- **Your tools then fail durably, not transiently.** Calling a tool whose plugin failed to activate
+  says so and does not invite a retry — the condition will not resolve on its own.
+- **You have 15 seconds.** `activate` is where a plugin does network work, so it is bounded: an
+  unresolved callback here would otherwise hold the boot sequence open forever, and every *core tool*
+  would report "still starting up" for the life of the session. (Transport traffic is unaffected —
+  see above.) Overrun is recorded exactly like a throw.
+- **A timed-out `activate` is abandoned, not cancelled.** Nothing can stop a promise that is already
+  running, so after the ceiling fires your plugin is marked failed and its tools say so — while your
+  `activate` keeps going and its side effects still land. Write it so that finishing after it has
+  been given up on is safe; if it must not half-apply, make it idempotent or do the write last.
+- **Failure is per-plugin and non-transactional.** Only *your tools and briefing* are withdrawn.
+  Anything else you registered — an interceptor, transport, credentials, identity — was composed at
+  load time and stays live. Side effects your `activate` already completed are not rolled back, and
+  later plugins activate normally. Registration is atomic; activation is not.
+
+**Session attributes — publishing facts about yourself.** The relay handle also carries
+`setAttributes`, which writes key/value facts onto a session's own registry entry. Peers see them on
+`list_relay_agents`, and the roster renders them without core interpreting a single key:
+
+```js
+async activate({ relay, self }) {
+  const res = await relay.setAttributes({
+    attributes: { "role.code-owner": new Date().toISOString() },
+  });
+  // It REPORTS failure, it does not throw one — see below.
+  if (!res.ok) throw new Error(`could not publish role: ${res.error}`);
+}
+```
+
+- **It reports failure by returning, not by throwing.** Every call resolves to
+  `{ ok: true, attributes }` or `{ ok: false, error }`. Nothing inspects that for you: a plugin whose
+  publish silently failed is still logged as activated, with its tools enabled and its briefing
+  present. If publishing is a precondition for your plugin being useful, check `ok` and throw — that
+  is what turns it into a contained activation failure. If it's best-effort, log it and carry on. What
+  you must not do is ignore it.
+- **`relay.setAttributes` always exists; support does not.** It is an optional *transport* capability,
+  so the function is always there and a transport that doesn't implement it returns a clear
+  "not supported by the active transport" result. Feature-detecting on `typeof` tells you nothing.
+- **`await` it.** `activate` is awaited and its failures are contained, so an awaited rejection is
+  reported against your plugin. A floating promise escapes that containment entirely — Node
+  terminates the process on an unhandled rejection by default.
+- **The target session is named by `id`.** Omit it and you write your own entry. Unknown options are
+  rejected rather than ignored, because every near-miss for that name (`sessionId`, `to`, `target`)
+  would otherwise be dropped silently, redirect the write to *your* entry, and still return
+  `ok: true` — and `force` gives no signal either, since it is accepted on a self-write.
+- **PATCH, not replace.** Keys you send are set; keys you don't are left alone; a key whose value is
+  `null` is **removed** and never stored. The merge happens in the store, not in JavaScript, so two
+  sessions patching *different* keys at the same time don't clobber each other. Two patches of the
+  *same* key are ordinary last-writer-wins.
+- **Values are strings.** That is the portable contract every transport has to honour, with `null`
+  reserved for deletion. A given transport may happen to round-trip richer JSON — the local one does —
+  but a plugin that relies on it stops working the moment someone installs a different transport.
+- **Writing another session's entry needs `force: true`.** That write changes the state of something
+  that is running and will not be told, so it has to be asked for rather than happening by default.
+  It's a convention, not a wall — the mesh is trusted and nothing stops you setting the flag. The
+  point is that the dangerous call looks dangerous.
+- **Dotted keys group in the roster.** `role.owner` and `role.reviewer` render as `role: owner=…,
+  reviewer=…` — the namespace named once instead of repeated, values kept. Purely structural: core
+  groups on the dot and knows nothing about what a key means. A key whose value is the empty string
+  is omitted entirely, so use any non-empty value rather than `""` as a presence marker.
+- **`force` is decided by core, not by the transport.** So is rejecting an unknown option, refusing a
+  non-string value, and treating `undefined` as a removal. A transport receives an already-validated
+  patch and only has to merge it into its store — which is why these rules hold identically on a
+  transport you install later, including one nobody has written yet.
+- **Attributes live as long as the registry entry does**, which differs by transport. The local SQLite
+  transport *deletes* a session's entry on a graceful exit, so its attributes go with it; the
+  cross-machine Postgres transport marks the session offline and keeps the entry, so a resumed session
+  still has them.
+
 - **Trusted, not sandboxed.** Loaded modules are **your own code** — only ever the modules you point at
   via the env var / plugin dir. The loader fetches nothing and never loads anything derived from message
   content.
-- **Fail-loud + all-or-nothing.** A plugin that fails to import, isn't a factory, returns an invalid
-  registration, or declares any invalid capability makes startup **stop with a clear error naming the
-  plugin** — the extension reports **inactive** (`send_message` / `list_relay_agents` say it didn't start)
-  rather than silently running degraded. A plugin is folded in only after its WHOLE registration
-  validates. (A plugin that *hangs* is out of scope — it's trusted code.)
+- **Fail-loud + all-or-nothing, over what it recognises.** Anything the loader catches while importing
+  or validating a plugin — a failed import, a missing factory, an invalid registration, a malformed
+  tool, a name collision — **stops plugin loading with an error naming the plugin**. The extension then
+  joins with core's tools only, and those tools report the inactive state rather than the session
+  silently running degraded. A registration that fails contributes nothing, not even the parts of it
+  that were valid. Validation is structural and covers the *known* capability keys: an unrecognised key
+  is ignored rather than rejected, so a misspelled `breifing` loads cleanly and simply does nothing,
+  and a tool's `parameters` is checked to be an object rather than validated as JSON Schema. (A plugin
+  that *hangs* during load is out of scope — it's trusted code. `activate` is separately bounded.)
+- **Containment covers `activate`, not your handlers.** A tool handler is invoked directly; if it
+  throws or rejects, that escapes to the tool call rather than being converted. Return the documented
+  failure result for expected failures.
 - **Opt-in.** With no `AGENT_RELAY_PLUGINS` paths **and** no plugins in the directory, nothing loads —
   behaviour is exactly the dependency-free local default.
 
 **Verify it loaded.** On startup each plugin logs `plugin loaded: <name>` to the rolling diagnostic log at
 `<data-dir>/logs/agent-relay.log`; a failing one makes the extension fail to start with the error above
 (naming the plugin). On Windows `<data-dir>` defaults to `%LOCALAPPDATA%\agent-relay` (see *Configuration*).
+
+That line means *this plugin registered*, not *this plugin is working*. It is written as each
+registration is accepted, so a later plugin can still fail the whole load, and this one can still fail
+activation and lose its tools and briefing. For plugins loaded via `AGENT_RELAY_PLUGINS` the name is
+the entry filename, so several `index.mjs` paths produce indistinguishable lines — a directory-installed
+plugin is named by its folder and does not have that problem. To confirm a plugin is actually usable,
+look for `plugin activated: <name>` and the absence of a `failed to activate` warning.
 
 ## License
 
