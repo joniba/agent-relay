@@ -136,7 +136,13 @@ export function createExtensionRuntime({
     return bootError
       ? { textResultForLlm: `agent-relay failed to start: ${bootError}`, resultType: "failure" }
       : {
-          textResultForLlm: "agent-relay is still starting up — try again in a moment.",
+          // Says how long, because "in a moment" invites an immediate retry that fails
+          // the same way. Bringing a cross-machine transport up means minting a token,
+          // opening TLS, migrating and registering — tens of seconds, not an instant.
+          textResultForLlm:
+            "agent-relay is still connecting. A cross-machine transport can take " +
+            "20 seconds or so to come up; a local one is near-instant. Retry after a " +
+            "short wait, and if it keeps saying this, check the diagnostic log.",
           resultType: "failure",
         };
   }
@@ -336,6 +342,14 @@ export function createExtensionRuntime({
         return;
       }
 
+      // Mark the attempt BEFORE making it. Bringing a remote transport up costs real
+      // time — around 20s against Azure Postgres, since it mints an Entra token,
+      // opens TLS, migrates and registers — and a session can easily finish and exit
+      // inside that window. Without this line the log ends at "plugin loaded" and
+      // three very different outcomes are indistinguishable: still connecting, died
+      // silently, or the process exited first. With it, a log that stops here says
+      // exactly which.
+      relayLog(`connecting via ${config.remote ? "remote" : "local"} transport…`);
       const started = await startRelaySession({ session, config, log: relayLog });
       relay = started.relay;
       self = started.self;
