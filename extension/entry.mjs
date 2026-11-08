@@ -22,7 +22,6 @@
 // the same fail-loud-but-visible contract the entry had before the reorder.
 
 import { formatRoster } from "./roster.mjs";
-import { activatePlugins } from "./bootstrap.mjs";
 import { join } from "node:path";
 
 /**
@@ -90,9 +89,9 @@ function guardPluginTools(plugins, failures, relayUnusable) {
  * @param {(opts: object) => Promise<any>} deps.createConfig
  * @param {(opts: object) => Promise<any>} deps.startRelaySession
  * @param {() => string} deps.resolveDataDir
- * @param {(opts: object) => Function} deps.createRollingFileLog
- * @param {(opts: object) => Function} deps.createRelayLog
- * @param {(id: string) => string} deps.aliasFor
+ * @param {(opts: object) => Function|Promise<Function>} deps.createRollingFileLog
+ * @param {(opts: object) => Function|Promise<Function>} deps.createRelayLog
+ * @param {(id: string) => string|Promise<string>} deps.aliasFor
  * @param {NodeJS.ProcessEnv} [deps.env]
  * @returns {{ start: () => Promise<void>, shutdown: () => Promise<void>, state: () => object }}
  */
@@ -140,9 +139,9 @@ export function createExtensionRuntime({
           // the same way. Bringing a cross-machine transport up means minting a token,
           // opening TLS, migrating and registering — tens of seconds, not an instant.
           textResultForLlm:
-            "agent-relay is still connecting. A cross-machine transport can take " +
-            "20 seconds or so to come up; a local one is near-instant. Retry after a " +
-            "short wait, and if it keeps saying this, check the diagnostic log.",
+            "agent-relay is still connecting. Remote authorization can take more than " +
+            "a minute. Wait for the connection confirmation before retrying; if it " +
+            "does not arrive, check the diagnostic log.",
           resultType: "failure",
         };
   }
@@ -237,6 +236,7 @@ export function createExtensionRuntime({
     }
     try {
       if (relay) await relay.stop();
+      else if (transport) await transport.stop?.();
     } catch {
       /* best-effort */
     }
@@ -297,7 +297,7 @@ export function createExtensionRuntime({
     // (2) the first 8 chars of the session id — the AUTHORITATIVE key, since aliases can
     // collide; the id8 always disambiguates. e.g. "[loon 0c854195]".
     const sessionId = String(session.sessionId ?? "");
-    const sessionTag = `${env.AGENT_RELAY_NAME || aliasFor(sessionId)} ${sessionId.slice(0, 8)}`.trim();
+    const sessionTag = `${env.AGENT_RELAY_NAME || await aliasFor(sessionId)} ${sessionId.slice(0, 8)}`.trim();
 
     // A rolling on-disk log in the canonical data dir, so diagnostics survive after the
     // live session timeline scrolls away — and exist even when no session is watching.
@@ -305,7 +305,7 @@ export function createExtensionRuntime({
     let fileLog = () => {};
     if (dataDir) {
       try {
-        fileLog = createRollingFileLog({ dir: join(dataDir, "logs"), tag: sessionTag });
+        fileLog = await createRollingFileLog({ dir: join(dataDir, "logs"), tag: sessionTag });
       } catch {
         /* logger construction failed → degrade to timeline-only logging */
       }
@@ -316,7 +316,7 @@ export function createExtensionRuntime({
     // the session isn't cluttered with technical detail — see createRelayLog. `booting`
     // gates the startup-warning window: warnings surface while booting, file-only after.
     let booting = true;
-    const relayLog = createRelayLog({
+    const relayLog = await createRelayLog({
       sessionLog: (msg, opts) => session.log?.(msg, opts),
       fileLog,
       isBooting: () => booting,
@@ -341,6 +341,11 @@ export function createExtensionRuntime({
         relayLog(`agent-relay failed to start: ${bootError}`, { level: "error" });
         return;
       }
+      transport = config.transport ?? null;
+      if (cleanedUp) {
+        await transport?.stop?.();
+        return;
+      }
 
       // Mark the attempt BEFORE making it. Bringing a remote transport up costs real
       // time — around 20s against Azure Postgres, since it mints an Entra token,
@@ -360,6 +365,7 @@ export function createExtensionRuntime({
       // Plugins act on the mesh for the first time here — after registration, before
       // the session is announced as ready. A plugin that throws is contained: its own
       // tools report the failure, everything else carries on.
+      const { activatePlugins } = await import("./bootstrap.mjs");
       await activatePlugins({
         plugins: config.plugins ?? [],
         relay: pluginRelayFacade(relay),

@@ -1,11 +1,7 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createLocalAliasIdentity } from "./identity/local-alias.mjs";
 import { createNoneCredentials } from "./credentials/none.mjs";
-import { createSqlitePollTransport } from "./transports/sqlite-poll.mjs";
-import { dataFile, ensureDataDir } from "./storage/paths.mjs";
-import { migrateLocalDbOnce } from "./storage/local-db.mjs";
 import { loadPlugins } from "./plugin-loader.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -51,7 +47,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export async function createConfig({ env = process.env, dataDir, log = () => {}, reservedToolNames = [] } = {}) {
   const registry = await loadPlugins({ env, dataDir, log, reservedToolNames });
   return {
-    identity: registry.identity ?? createLocalAliasIdentity(),
+    identity: registry.identity ?? {
+      resolve: async (session) =>
+        (await import("./identity/local-alias.mjs")).createLocalAliasIdentity().resolve(session),
+    },
     interceptors: registry.interceptors,
     plugins: registry.plugins,
     // `remote` is a non-seam hint for the entry's boot/connected log lines: true when
@@ -59,7 +58,7 @@ export async function createConfig({ env = process.env, dataDir, log = () => {},
     remote: !!registry.transport,
     ...(registry.transport
       ? { transport: registry.transport.create({ log }), credentials: registry.credentials ?? createNoneCredentials() }
-      : localSlice(env)),
+      : await localSlice(env)),
   };
 }
 
@@ -72,7 +71,12 @@ export async function createConfig({ env = process.env, dataDir, log = () => {},
  *   credentials: import('./seams/credentials.mjs').CredentialProvider,
  * }}
  */
-function localSlice(env = process.env) {
+async function localSlice(env = process.env) {
+  const [
+    { createSqlitePollTransport }, { dataFile, ensureDataDir }, { migrateLocalDbOnce },
+  ] = await Promise.all([
+    import("./transports/sqlite-poll.mjs"), import("./storage/paths.mjs"), import("./storage/local-db.mjs"),
+  ]);
   const explicitDb = env.AGENT_RELAY_DB;
   if (explicitDb) {
     return {

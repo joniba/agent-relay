@@ -76,8 +76,13 @@ export function createRollingFileLog({
       // timestamp (deterministic + platform-independent); else start fresh now.
       if (periodStart === null) periodStart = fileStart(fs, current) ?? t;
       if (t - periodStart >= rotateAfterMs) {
-        rotate();
-        periodStart = t;
+        const sharedPeriod = fileStart(fs, current);
+        if (sharedPeriod !== null && t - sharedPeriod < rotateAfterMs) {
+          periodStart = sharedPeriod;
+        } else {
+          rotate();
+          periodStart = t;
+        }
       }
       fs.appendFileSync(
         current,

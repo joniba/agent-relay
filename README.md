@@ -1,5 +1,11 @@
 # agent-relay
 
+Startup publishes core and plugin tools before loading identity, relay processing,
+and file-logging code that is not needed for tool registration. The extension log
+records the registration time; remote authorization can continue afterward while
+tools clearly report that connection is still in progress. Shared file-log rotation
+checks whether another session has already opened a new logging period.
+
 > Minimal, unopinionated cross-session messaging for the GitHub Copilot CLI. One
 > running session can send a message to another and **wake it into a turn** — no
 > human at the keyboard — using the first-party `session.send()` SDK primitive.

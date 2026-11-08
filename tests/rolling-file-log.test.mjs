@@ -116,6 +116,21 @@ test("resumes the current period across a restart via the first-line timestamp",
   assert.match(fs._files.get(C).content, /second/);
 });
 
+test("concurrent sessions do not rotate a new period using their cached old timestamp", () => {
+  let t = 1_700_000_000_000;
+  const fs = memFs();
+  const first = createRollingFileLog({ dir: DIR, now: () => t, fs });
+  const second = createRollingFileLog({ dir: DIR, now: () => t, fs });
+  first("old first");
+  second("old second");
+  t += DAY;
+  first("new first");
+  second("new second");
+  assert.match(fs._files.get(C).content, /new first[\s\S]*new second/);
+  assert.match(fs._files.get(R(1)).content, /old first[\s\S]*old second/);
+  assert.equal(fs._files.has(R(2)), false);
+});
+
 test("treats an existing log with an unparseable first line as a fresh period", () => {
   let t = 1_700_000_000_000;
   const fs = memFs();

@@ -170,7 +170,7 @@ test("before the relay is ready, tools report a TRANSIENT not-ready state", asyn
   const early = await listAgents.handler({});
   assert.match(early.textResultForLlm, /still connecting/);
   // Says HOW LONG: "in a moment" invited an immediate retry that fails identically.
-  assert.match(early.textResultForLlm, /20 seconds/);
+  assert.match(early.textResultForLlm, /more than a minute/);
 
   // After a terminal boot failure the message becomes the actual cause, not "try again".
   await runtime.start();
@@ -471,6 +471,45 @@ test("shutdown before the relay exists does not throw", async () => {
   const h = harness();
   await createExtensionRuntime(h.deps).shutdown();
   assert.deepEqual(h.deregistered, []);
+});
+
+test("shutdown stops a transport while authorization is still pending", async () => {
+  let announce;
+  let release;
+  const pending = new Promise(resolve => { announce = resolve; });
+  const stopped = new Promise(resolve => { release = resolve; });
+  let stops = 0;
+  const h = harness({
+    config: { transport: { stop: async () => { stops++; release(); } } },
+    deps: {
+      startRelaySession: async () => {
+        announce();
+        await stopped;
+        throw new Error("authorization cancelled");
+      },
+    },
+  });
+  const runtime = createExtensionRuntime(h.deps);
+  const boot = runtime.start();
+  await pending;
+  await runtime.shutdown();
+  await boot;
+  assert.ok(stops >= 1);
+  assert.match(runtime.state().bootError, /authorization cancelled/);
+});
+
+test("tools are joined before deferred logging and identity code loads", async () => {
+  const h = harness();
+  const later = [];
+  h.deps.aliasFor = async () => { later.push(h.joined.length); return "loon"; };
+  h.deps.createRollingFileLog = async () => { later.push(h.joined.length); return () => {}; };
+  h.deps.createRelayLog = async ({ isBooting }) => {
+    later.push(h.joined.length);
+    return msg => h.lines.push({ msg, booting: isBooting() });
+  };
+  await createExtensionRuntime(h.deps).start();
+  assert.deepEqual(later, [1, 1, 1]);
+  assert.equal(h.joined[0].tools.length, 2);
 });
 
 test("a teardown requested DURING boot is honoured once boot completes", async () => {
