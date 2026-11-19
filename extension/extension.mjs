@@ -8,7 +8,7 @@
 //
 // Requires `copilot --experimental` (extensions are gated behind it) and Node 22+.
 
-import { joinSession } from "@github/copilot-sdk/extension";
+import { joinSession } from "./sdk-compat.mjs";
 import { createConfig } from "./config.mjs";
 import { startRelaySession } from "./bootstrap.mjs";
 import { resolveDataDir } from "./storage/paths.mjs";
