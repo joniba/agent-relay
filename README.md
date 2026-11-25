@@ -90,6 +90,14 @@ copilot --experimental
 
 The alias also renders below your prompt as `[stone]` via the Copilot **statusline**
 (wired up by the installer; pass `--no-statusline` to skip).
+It reads the actual registered name from a small local snapshot, including any
+collision resolution. It stays empty until registration succeeds, or if the
+snapshot is unavailable; it never guesses an alias or contacts the transport.
+Sessions already running older code publish no snapshot and need to reload the
+extension before their registered name can appear.
+Transports that automatically re-register should invoke the optional
+`TransportContext.onRegistered(self)` notification after each successful commit;
+this keeps the snapshot current when a reconnect changes the alias.
 
 ## Usage
 

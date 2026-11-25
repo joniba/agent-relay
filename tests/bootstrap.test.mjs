@@ -120,6 +120,25 @@ test("passes the resolved credentials into the transport's init ctx", async () =
   assert.equal(t.calls.ctx.self.name, "gull");
 });
 
+test("registration notifications cross the transport seam and cannot break registration", async () => {
+  const t = fakeTransport();
+  const seen = [];
+  const logs = [];
+  const registered = await startRelaySession({
+    session: fakeSession(), config: configFor(t),
+    onRegistered: (identity) => {
+      seen.push(identity.name);
+      if (identity.name === "changed") throw new Error("display unavailable");
+    },
+    log: (message) => logs.push(message),
+  });
+  t.calls.ctx.onRegistered(registered.self);
+  assert.doesNotThrow(() => t.calls.ctx.onRegistered({ ...registered.self, name: "changed" }));
+  assert.deepEqual(seen, ["gull", "changed"]);
+  assert.match(logs[0], /registration notification failed: display unavailable/);
+  assert.equal(t.stopped, false);
+});
+
 test("the started relay is live and delivers a message to the session", async () => {
   const t = fakeTransport();
   const session = fakeSession();

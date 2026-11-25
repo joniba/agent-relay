@@ -92,7 +92,7 @@ function guardPluginTools(plugins, failures, relayUnusable) {
  * @param {() => string} deps.resolveDataDir
  * @param {(opts: object) => Function} deps.createRollingFileLog
  * @param {(opts: object) => Function} deps.createRelayLog
- * @param {(id: string) => string} deps.aliasFor
+ * @param {(opts: object) => { publish: Function, close: Function }} deps.createRegisteredNamePublisher
  * @param {NodeJS.ProcessEnv} [deps.env]
  * @returns {{ start: () => Promise<void>, shutdown: () => Promise<void>, state: () => object }}
  */
@@ -103,7 +103,7 @@ export function createExtensionRuntime({
   resolveDataDir,
   createRollingFileLog,
   createRelayLog,
-  aliasFor,
+  createRegisteredNamePublisher,
   env = process.env,
 }) {
   let relay = null;
@@ -114,6 +114,8 @@ export function createExtensionRuntime({
   let bootError = null; // set if plugin loading or bootstrap failed (terminal, not transient)
   let cleanedUp = false;
   let loadedPlugins = [];
+  let namePublisher = null;
+  let relayLog = () => {};
   /** plugin record -> activation failure message. Read by guarded tool handlers. */
   const pluginFailures = new Map();
 
@@ -226,10 +228,32 @@ export function createExtensionRuntime({
     },
   };
 
+  function clearRegisteredName() {
+    try {
+      namePublisher?.close();
+    } catch (err) {
+      relayLog(`agent-relay: could not clear registered statusline name: ${err.message}`, {
+        level: "warning",
+      });
+    }
+  }
+
+  function publishRegisteredName(identity) {
+    if (cleanedUp) return;
+    try {
+      namePublisher?.publish(identity.name);
+    } catch (err) {
+      relayLog(`agent-relay: could not publish registered statusline name: ${err.message}`, {
+        level: "warning",
+      });
+    }
+  }
+
   /** Deregister presence then stop the transport. Idempotent. */
   async function shutdown() {
     if (cleanedUp) return;
     cleanedUp = true;
+    clearRegisteredName();
     try {
       if (transport && self) await transport.deregister(self);
     } catch {
@@ -288,16 +312,10 @@ export function createExtensionRuntime({
 
     session = await joinSession({ tools, hooks });
 
-    // Per-session tag for the rolling log, so lines from concurrent sessions sharing the
-    // file are correlatable. Two parts: (1) the friendly alias — computed with the SAME
-    // precedence as the statusline's resolveName (AGENT_RELAY_NAME override, else the
-    // deterministic aliasFor(sessionId)), so a log line matches the [alias] under the
-    // prompt; this is deliberately the statusline preview, NOT the post-registration name
-    // (which the registry may bump on a local collision) — keeping log↔statusline parity.
-    // (2) the first 8 chars of the session id — the AUTHORITATIVE key, since aliases can
-    // collide; the id8 always disambiguates. e.g. "[loon 0c854195]".
+    // Until registration completes only the session id is known. Afterwards the
+    // log uses the same authoritative name as the briefing and statusline.
     const sessionId = String(session.sessionId ?? "");
-    const sessionTag = `${env.AGENT_RELAY_NAME || aliasFor(sessionId)} ${sessionId.slice(0, 8)}`.trim();
+    const sessionTag = () => `${self?.name ?? ""} ${sessionId.slice(0, 8)}`.trim();
 
     // A rolling on-disk log in the canonical data dir, so diagnostics survive after the
     // live session timeline scrolls away — and exist even when no session is watching.
@@ -316,7 +334,7 @@ export function createExtensionRuntime({
     // the session isn't cluttered with technical detail — see createRelayLog. `booting`
     // gates the startup-warning window: warnings surface while booting, file-only after.
     let booting = true;
-    const relayLog = createRelayLog({
+    relayLog = createRelayLog({
       sessionLog: (msg, opts) => session.log?.(msg, opts),
       fileLog,
       isBooting: () => booting,
@@ -334,6 +352,16 @@ export function createExtensionRuntime({
       for (const [message, opts] of buffered.splice(0)) relayLog(message, opts);
       logSink = relayLog;
 
+      if (dataDir) {
+        try {
+          namePublisher = createRegisteredNamePublisher({ dir: dataDir, sessionId });
+        } catch (err) {
+          relayLog(`agent-relay: could not initialize registered statusline name: ${err.message}`, {
+            level: "warning",
+          });
+        }
+      }
+
       // Guard on the actual invariant. `bootError` is a message, and a plugin can
       // throw something without one — testing it instead of `config` would let boot
       // continue and replace the plugin's error with a null dereference.
@@ -350,10 +378,14 @@ export function createExtensionRuntime({
       // silently, or the process exited first. With it, a log that stops here says
       // exactly which.
       relayLog(`connecting via ${config.remote ? "remote" : "local"} transport…`);
-      const started = await startRelaySession({ session, config, log: relayLog });
+      const started = await startRelaySession({
+        session, config, log: relayLog, onRegistered: publishRegisteredName,
+      });
       relay = started.relay;
       self = started.self;
       transport = started.transport;
+      // Also supports transports predating registration notifications.
+      publishRegisteredName(self);
       // File-only registration detail (id/name) for the log; the human-facing
       // confirmation is the single terminal line below.
       relayLog(`registered id=${String(self.id ?? "").slice(0, 8)} name=${self.name}`);
@@ -381,6 +413,7 @@ export function createExtensionRuntime({
       // Any boot failure (a transport that couldn't come up) marks the relay INACTIVE
       // for this session - no silent fallback to a different mesh.
       ready = false;
+      clearRegisteredName();
       bootError = (err && err.message) || String(err);
       relayLog(`agent-relay failed to start: ${bootError}`, { level: "error" });
     } finally {

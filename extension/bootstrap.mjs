@@ -54,17 +54,28 @@ export const ACTIVATE_TIMEOUT_MS = 15_000;
  *   interceptors?: import('./seams/interceptor.mjs').Interceptor[],
  * }} deps.config  The composed seam bundle.
  * @param {import('./seams/log.mjs').Logger} [deps.log]  Diagnostic logger (tee'd to the sink).
+ * @param {(self: import('./seams/identity.mjs').AgentIdentity) => void} [deps.onRegistered]
+ *   Optional notification after registration, including transport-owned reconnects.
  * @returns {Promise<{
  *   relay: ReturnType<typeof createRelay>,
  *   self: import('./seams/identity.mjs').AgentIdentity,
  *   transport: import('./seams/transport.mjs').Transport,
  * }>}
  */
-export async function startRelaySession({ session, config, log }) {
+export async function startRelaySession({ session, config, log, onRegistered }) {
   const self = await config.identity.resolve(session);
+  const notifyRegistered = (identity) => {
+    try {
+      onRegistered?.(identity);
+    } catch (err) {
+      log?.(`agent-relay: registration notification failed: ${err.message}`, { level: "warning" });
+    }
+  };
 
   try {
-    await config.transport.init({ self, credentials: config.credentials });
+    await config.transport.init({
+      self, credentials: config.credentials, onRegistered: notifyRegistered,
+    });
     await config.transport.register(self);
   } catch (err) {
     // init() succeeded but register() failed (or init() itself failed) - release

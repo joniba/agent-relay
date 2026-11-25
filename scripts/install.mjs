@@ -170,7 +170,7 @@ function installCore() {
 }
 
 /** Point Copilot's single statusLine slot at agent-relay's statusline script. Shows THIS
- *  session's locally-generated alias below the prompt. Replaces whatever was configured. */
+ *  session's registered alias below the prompt. Replaces whatever was configured. */
 function wireStatusline() {
   const statusScript = join(dest, "bin", "agent-relay-statusline.mjs");
   if (!existsSync(statusScript)) { warn(`Statusline script not found at ${statusScript} — skipped.`); return; }
