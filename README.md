@@ -102,6 +102,11 @@ Snapshots refresh every five seconds and expire after fifteen seconds without a
 refresh. Each runtime writes its own snapshot so an older runtime cannot replace
 a newer runtime's name; shutdown removes that runtime's snapshot. Small per-session
 index files and crash remnants remain in the data directory until it is cleaned.
+This is best-effort display state: if two runtimes share a session ID and selecting
+the newer runtime's saved name fails, the older runtime's label can persist.
+Synchronous file access can also delay rendering or relay callbacks on unhealthy
+or redirected storage. In these cases, use `list_relay_agents` as the authority
+rather than relying on the label.
 
 ## Usage
 
