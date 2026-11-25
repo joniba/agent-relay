@@ -105,6 +105,12 @@
  * @typedef {object} TransportContext
  * @property {AgentIdentity} self                The resolved identity of this session.
  * @property {CredentialProvider} credentials    For transports that need auth.
+ * @property {(self: AgentIdentity) => void} [onRegistered]
+ *   Optional, synchronous notification AFTER a successful registration commits.
+ *   Transports that re-register internally should call it on every success so
+ *   host-side identity displays stay current after reconnects. Older transports
+ *   may omit notifications; the host handles their initial registration result.
+ *   The host must contain callback failures so observability cannot break registration.
  */
 
 /**

@@ -90,6 +90,24 @@ copilot --experimental
 
 The alias also renders below your prompt as `[stone]` via the Copilot **statusline**
 (wired up by the installer; pass `--no-statusline` to skip).
+It reads the actual registered name from a small local snapshot, including any
+collision resolution. It stays empty until registration succeeds, or if the
+snapshot is unavailable; it never guesses an alias or contacts the transport.
+Sessions already running older code publish no snapshot and need to reload the
+extension before their registered name can appear.
+Transports that automatically re-register should invoke the optional
+`TransportContext.onRegistered(self)` notification after each successful commit;
+this keeps the snapshot current when a reconnect changes the alias.
+Snapshots are written when registration succeeds and when a later registration
+changes the name, not on a timer. Unchanged names cause no repeated writes and do
+not expire with elapsed time. Each runtime writes its own snapshot; shutdown
+removes that runtime's snapshot. Small per-session
+index files and crash remnants remain in the data directory until it is cleaned.
+This is best-effort display state: if two runtimes share a session ID and selecting
+the newer runtime's saved name fails, the older runtime's label can persist.
+Synchronous file access can also delay rendering or relay callbacks on unhealthy
+or redirected storage. In these cases, use `list_relay_agents` as the authority
+rather than relying on the label.
 
 ## Usage
 

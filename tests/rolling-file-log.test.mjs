@@ -74,6 +74,18 @@ test("does NOT rotate while the current file is younger than the window", () => 
   assert.match(fs._files.get(C).content, /a\n.*b\n/s, "both lines in the current file");
 });
 
+test("a dynamic tag follows the registered name without recreating the logger", () => {
+  const fs = memFs();
+  let tag = "0c854195";
+  const log = createRollingFileLog({ dir: DIR, tag: () => tag, fs });
+  log("connecting");
+  tag = "liam 0c854195";
+  log("registered");
+  const lines = fs._files.get(C).content.trimEnd().split("\n");
+  assert.match(lines[0], /\[0c854195\] INFO  connecting$/);
+  assert.match(lines[1], /\[liam 0c854195\] INFO  registered$/);
+});
+
 test("rotates current -> .1 once the window elapses", () => {
   let t = 1_700_000_000_000;
   const fs = memFs(() => t);

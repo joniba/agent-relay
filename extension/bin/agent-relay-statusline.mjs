@@ -8,12 +8,11 @@
  *
  * Shows THIS session's agent-relay alias as `[<name>]` below the prompt.
  *
- * The alias is a DETERMINISTIC function of the local session id — the same
- * derivation the identity provider uses — so we compute it directly here. That
- * means NO database read and NO network, and it is transport-agnostic: it works
- * whether the session joined the local SQLite mesh or a cross-machine mesh. Precedence mirrors the identity provider: an explicit AGENT_RELAY_NAME
- * wins, else the wordlist alias. (A registry collision could in theory bump the
- * registered name off this first choice; that rare case isn't reflected here.)
+ * Reads a small local snapshot published after successful registration. The
+ * registered name is authoritative, including collision resolution and explicit
+ * overrides. No database or network access, regardless of the active transport.
+ * Before registration, or when no live snapshot is available, emits nothing
+ * rather than guessing a name.
  *
  * Contract (mirrors the Copilot CLI statusline protocol):
  *   - The CLI invokes us on each statusline refresh, piping a JSON document on
@@ -25,7 +24,8 @@
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { aliasFor } from "../identity/local-alias.mjs";
+import { resolveDataDir } from "../storage/paths.mjs";
+import { readRegisteredName } from "../storage/registered-name.mjs";
 
 /** Strip C0 control chars + DEL so the rendered statusline can't be injected. */
 export function stripControlChars(s) {
@@ -34,18 +34,21 @@ export function stripControlChars(s) {
 }
 
 /**
- * Resolve THIS session's alias from its session id — explicit AGENT_RELAY_NAME
- * override wins, else the deterministic wordlist alias (same as the identity
- * provider). Pure; no DB, no network. Returns null when there's no session id.
+ * Resolve THIS session's registered name. Environment overrides are inputs to
+ * registration, not a substitute for its result. Missing/unreadable state stays
+ * empty, as required by the failure-isolated statusline protocol.
  *
  * @param {string} sessionId
  * @param {NodeJS.ProcessEnv} [env]
  * @returns {string|null}
  */
 export function resolveName(sessionId, env = process.env) {
-  if (!sessionId) return null;
-  if (env.AGENT_RELAY_NAME) return env.AGENT_RELAY_NAME;
-  return aliasFor(sessionId);
+  if (typeof sessionId !== "string" || !sessionId) return null;
+  try {
+    return readRegisteredName(sessionId, { dir: resolveDataDir({ env }) });
+  } catch {
+    return null;
+  }
 }
 
 /** Pure: name → statusline text (may be empty). */

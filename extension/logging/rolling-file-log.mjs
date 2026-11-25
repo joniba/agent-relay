@@ -39,7 +39,7 @@ const defaultFs = {
  * @param {string} opts.dir                directory the logs live in (created on demand)
  * @param {number} [opts.rotateAfterMs]    age at which the current file rotates (default 24h)
  * @param {number} [opts.keep]             rolled files retained besides the current (default 3)
- * @param {string} [opts.tag]              per-session tag prefixed on every line, e.g.
+ * @param {string|(() => string)} [opts.tag] per-session tag prefixed on every line, e.g.
  *                                         "loon 0c854195" (alias + session-id prefix)
  * @param {() => number} [opts.now]        clock seam, ms since epoch (default Date.now)
  * @param {typeof defaultFs} [opts.fs]     fs seam for tests
@@ -66,8 +66,6 @@ export function createRollingFileLog({
     if (fs.existsSync(current)) fs.renameSync(current, rolled(1)); // current -> .1
   }
 
-  const prefix = tag ? `[${tag}] ` : "";
-
   return function write(line, opts) {
     try {
       fs.mkdirSync(dir, { recursive: true });
@@ -79,6 +77,8 @@ export function createRollingFileLog({
         rotate();
         periodStart = t;
       }
+      const currentTag = typeof tag === "function" ? tag() : tag;
+      const prefix = currentTag ? `[${currentTag}] ` : "";
       fs.appendFileSync(
         current,
         `${new Date(t).toISOString()} ${prefix}${levelLabel(opts)} ${line}\n`,

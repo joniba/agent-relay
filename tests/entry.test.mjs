@@ -21,6 +21,7 @@ function harness(overrides = {}) {
   const order = [];
   const lines = [];
   const deregistered = [];
+  const names = [];
   let stopped = 0;
 
   const session = { sessionId: "abcdef01-2345-6789", log: async () => {} };
@@ -63,7 +64,10 @@ function harness(overrides = {}) {
     // Capture the booting state per line. Discarding `isBooting` is how a whole
     // class of "logged, but nowhere anyone reads" bugs stays invisible.
     createRelayLog: ({ isBooting }) => (msg) => lines.push({ msg, booting: isBooting() }),
-    aliasFor: () => "loon",
+    createRegisteredNamePublisher: () => ({
+      publish: (name) => names.push(name),
+      close: () => {},
+    }),
     env: {},
   };
 
@@ -81,6 +85,7 @@ function harness(overrides = {}) {
     self,
     stopped: () => stopped,
     deregistered,
+    names,
   };
 }
 
@@ -404,6 +409,83 @@ test("one plugin's failure does not disable a same-named plugin's tools", async 
 
 // -- buffered diagnostics -----------------------------------------------------
 
+test("registration publishes the chosen name, not the environment's preview", async () => {
+  const h = harness({ deps: { env: { AGENT_RELAY_NAME: "preview" } } });
+  h.deps.startRelaySession = async () => {
+    assert.deepEqual(h.names, [], "must not publish before registration");
+    return { self: h.self, relay: {}, transport: {} };
+  };
+  await createExtensionRuntime(h.deps).start();
+  assert.deepEqual(h.names, ["loon"]);
+});
+
+test("transport re-registration refreshes the published name, but never after shutdown", async () => {
+  const h = harness();
+  let onRegistered;
+  h.deps.startRelaySession = async (args) => {
+    onRegistered = args.onRegistered;
+    return { self: h.self, relay: {}, transport: {} };
+  };
+  const runtime = createExtensionRuntime(h.deps);
+  await runtime.start();
+  onRegistered({ ...h.self, name: "liam" });
+  assert.deepEqual(h.names, ["loon", "liam"]);
+  await runtime.shutdown();
+  onRegistered({ ...h.self, name: "rick" });
+  assert.deepEqual(h.names, ["loon", "liam"]);
+});
+
+test("statusline publication failures are logged without disabling messaging", async () => {
+  for (const failAt of ["initialize", "publish"]) {
+    const h = harness({
+      deps: {
+        createRegisteredNamePublisher: () => {
+          if (failAt === "initialize") throw new Error("read-only directory");
+          return {
+            publish: () => { throw new Error("disk full"); },
+            close: () => {},
+          };
+        },
+      },
+    });
+    const runtime = createExtensionRuntime(h.deps);
+    await runtime.start();
+    assert.equal(runtime.state().ready, true);
+    assert.ok(h.lines.some(({ msg }) => msg.includes(`could not ${failAt} registered statusline name`)));
+  }
+});
+
+test("failed registration publishes no name and closes its snapshot lifetime", async () => {
+  let closed = 0;
+  const h = harness({
+    deps: {
+      startRelaySession: async () => { throw new Error("registration failed"); },
+      createRegisteredNamePublisher: () => ({
+        publish: (name) => h.names.push(name),
+        close: () => { closed += 1; },
+      }),
+    },
+  });
+  await createExtensionRuntime(h.deps).start();
+  assert.deepEqual(h.names, []);
+  assert.equal(closed, 1);
+});
+
+test("diagnostic tags use the session id before registration and chosen name afterwards", async () => {
+  const tags = [];
+  const h = harness({
+    deps: {
+      env: { AGENT_RELAY_NAME: "preview" },
+      createRollingFileLog: ({ tag }) => () => tags.push(tag()),
+      createRelayLog: ({ fileLog }) => fileLog,
+    },
+  });
+  await createExtensionRuntime(h.deps).start();
+  assert.equal(tags[0], h.session.sessionId.slice(0, 8));
+  assert.equal(tags.at(-1), `loon ${h.session.sessionId.slice(0, 8)}`);
+  assert.ok(tags.every((tag) => !tag.includes("preview")));
+});
+
 test("plugin-load diagnostics are buffered and replayed inside the booting window", async () => {
   const h = harness();
   await createExtensionRuntime(h.deps).start();
@@ -457,6 +539,11 @@ test("a transport warning during startRelaySession still surfaces inside the boo
 
 test("shutdown deregisters presence then stops the relay, and is idempotent", async () => {
   const h = harness();
+  let closed = 0;
+  h.deps.createRegisteredNamePublisher = () => ({
+    publish: () => {},
+    close: () => { closed += 1; },
+  });
   const runtime = createExtensionRuntime(h.deps);
   await runtime.start();
 
@@ -465,6 +552,7 @@ test("shutdown deregisters presence then stops the relay, and is idempotent", as
 
   assert.deepEqual(h.deregistered, [h.self.id]);
   assert.equal(h.stopped(), 1);
+  assert.equal(closed, 1);
 });
 
 test("shutdown before the relay exists does not throw", async () => {

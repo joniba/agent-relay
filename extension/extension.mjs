@@ -12,7 +12,7 @@ import { joinSession } from "@github/copilot-sdk/extension";
 import { createConfig } from "./config.mjs";
 import { startRelaySession } from "./bootstrap.mjs";
 import { resolveDataDir } from "./storage/paths.mjs";
-import { aliasFor } from "./identity/local-alias.mjs";
+import { createRegisteredNamePublisher } from "./storage/registered-name.mjs";
 import { createRollingFileLog } from "./logging/rolling-file-log.mjs";
 import { createRelayLog } from "./logging/relay-log.mjs";
 import { createExtensionRuntime } from "./entry.mjs";
@@ -24,7 +24,7 @@ const runtime = createExtensionRuntime({
   resolveDataDir,
   createRollingFileLog,
   createRelayLog,
-  aliasFor,
+  createRegisteredNamePublisher,
   env: process.env,
 });
 
