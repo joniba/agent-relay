@@ -13,7 +13,7 @@ import {
   resolveName,
 } from "../extension/bin/agent-relay-statusline.mjs";
 import { aliasFor } from "../extension/identity/local-alias.mjs";
-import { createRegisteredNamePublisher, readRegisteredName } from "../extension/storage/registered-name.mjs";
+import { createRegisteredNamePublisher } from "../extension/storage/registered-name.mjs";
 
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), "relay-statusline-"));
@@ -80,10 +80,36 @@ test("a reconnect hides the old name, then publishes the new registration", (t) 
   assert.throws(() => current.publish("rick"), /closed/);
 });
 
-test("a failed alias update invalidates the old name and the lease refresh retries", (t) => {
+test("publishing does not schedule background refreshes or rewrite unchanged names", (t) => {
+  const f = fixture(t);
+  t.mock.method(globalThis, "setInterval", () => { throw new Error("unexpected background timer"); });
+  let writes = 0;
+  const publisher = f.publisher("sess-1", {
+    fs: {
+      ...fs,
+      writeFileSync: (...args) => { writes += 1; fs.writeFileSync(...args); },
+    },
+  });
+  publisher.publish("rick");
+  const afterRegistration = writes;
+  publisher.publish("rick");
+  assert.equal(writes, afterRegistration);
+  publisher.publish("liam");
+  assert.equal(writes, afterRegistration + 1);
+  assert.equal(resolveName("sess-1", f.env), "liam");
+});
+
+test("an unchanged live session's registered name does not expire with elapsed time", (t) => {
+  const f = fixture(t);
+  f.publisher("sess-1").publish("rick");
+  const later = Date.now() + 60_000;
+  t.mock.method(Date, "now", () => later);
+  assert.equal(resolveName("sess-1", f.env), "rick");
+});
+
+test("a failed alias update invalidates the old name and a later registration event retries", (t) => {
   const f = fixture(t);
   let fail = false;
-  let refresh;
   const publisher = f.publisher("sess-1", {
     fs: {
       ...fs,
@@ -92,24 +118,20 @@ test("a failed alias update invalidates the old name and the lease refresh retri
         fs.renameSync(...args);
       },
     },
-    setInterval: (callback) => { refresh = callback; return {}; },
-    clearInterval: () => {},
   });
   publisher.publish("rick");
   fail = true;
   assert.throws(() => publisher.publish("liam"), /disk full/);
   assert.equal(resolveName("sess-1", f.env), null);
   fail = false;
-  refresh();
+  publisher.publish("liam");
   assert.equal(resolveName("sess-1", f.env), "liam");
 });
 
-test("expiry bounds stale state even when invalidation fails and the PID is alive", (t) => {
+test("a failed update and invalidation report both errors and allow a later event to recover", (t) => {
   const f = fixture(t);
-  let time = Date.now();
   let fail = false;
   const publisher = f.publisher("sess-1", {
-    now: () => time,
     fs: {
       ...fs,
       renameSync: (...args) => {
@@ -121,14 +143,13 @@ test("expiry bounds stale state even when invalidation fails and the PID is aliv
         fs.unlinkSync(path);
       },
     },
-    setInterval: () => ({}), clearInterval: () => {},
   });
   publisher.publish("rick");
   fail = true;
   assert.throws(() => publisher.publish("liam"), /write and invalidation failed/);
-  time += 60_000;
-  assert.equal(readRegisteredName("sess-1", { dir: f.dir, now: () => time }), null);
   fail = false;
+  publisher.publish("liam");
+  assert.equal(resolveName("sess-1", f.env), "liam");
 });
 
 test("corrupt, mismatched and unreadable snapshots render nothing", (t) => {
