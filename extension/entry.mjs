@@ -354,7 +354,7 @@ export function createExtensionRuntime({
 
       if (dataDir) {
         try {
-          namePublisher = createRegisteredNamePublisher({ dir: dataDir, sessionId });
+          namePublisher = createRegisteredNamePublisher({ dir: dataDir, sessionId, log: relayLog });
         } catch (err) {
           relayLog(`agent-relay: could not initialize registered statusline name: ${err.message}`, {
             level: "warning",

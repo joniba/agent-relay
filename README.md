@@ -98,6 +98,10 @@ extension before their registered name can appear.
 Transports that automatically re-register should invoke the optional
 `TransportContext.onRegistered(self)` notification after each successful commit;
 this keeps the snapshot current when a reconnect changes the alias.
+Snapshots refresh every five seconds and expire after fifteen seconds without a
+refresh. Each runtime writes its own snapshot so an older runtime cannot replace
+a newer runtime's name; shutdown removes that runtime's snapshot. Small per-session
+index files and crash remnants remain in the data directory until it is cleaned.
 
 ## Usage
 

@@ -68,7 +68,13 @@ export async function startRelaySession({ session, config, log, onRegistered }) 
     try {
       onRegistered?.(identity);
     } catch (err) {
-      log?.(`agent-relay: registration notification failed: ${err.message}`, { level: "warning" });
+      try {
+        log?.(`agent-relay: registration notification failed: ${(err && err.message) || String(err)}`, {
+          level: "warning",
+        });
+      } catch {
+        // Even a broken diagnostic sink must not invalidate committed registration.
+      }
     }
   };
 

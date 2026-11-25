@@ -139,6 +139,19 @@ test("registration notifications cross the transport seam and cannot break regis
   assert.equal(t.stopped, false);
 });
 
+test("arbitrary observer failures and broken diagnostics cannot break committed registration", async () => {
+  for (const thrown of [null, undefined, "unavailable"]) {
+    const t = fakeTransport();
+    t.register = async (self) => t.calls.ctx.onRegistered(self);
+    await assert.doesNotReject(startRelaySession({
+      session: fakeSession(), config: configFor(t),
+      onRegistered: () => { throw thrown; },
+      log: () => { throw new Error("log unavailable"); },
+    }));
+    assert.equal(t.stopped, false);
+  }
+});
+
 test("the started relay is live and delivers a message to the session", async () => {
   const t = fakeTransport();
   const session = fakeSession();
